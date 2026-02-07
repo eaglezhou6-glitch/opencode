@@ -1,3 +1,4 @@
 plans/
 bun.lock
 package.json
+!plugin/compaction-limit/package.json
