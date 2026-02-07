@@ -1,7 +1,7 @@
 # Memory workspace
 
-This folder stores long-term memory for the memory agent and the main session
-loader.
+This folder stores long-term memory for the personal assistant and the main
+session loader.
 
 ## Files
 
@@ -18,11 +18,11 @@ The memory plugin injects:
 
 into the system prompt at session start.
 
+The personal assistant also writes new entries after sessions finish.
+
 ## Tools
 
 - `memory_search` for hybrid retrieval
-- `memory_write` to append daily or long-term notes
-- `memory_index` to rebuild the SQLite index
 
 ## Monitor process
 
