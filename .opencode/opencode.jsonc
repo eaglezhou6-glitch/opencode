@@ -9,6 +9,7 @@
     },
   },
   "mcp": {},
+  "plugin": ["./plugin/compaction-limit/src/index.ts"],
   "tools": {
     "github-triage": false,
     "github-pr-search": false,
