@@ -4,6 +4,7 @@ This plugin enforces a hard size limit for compaction summaries. It:
 
 - Adds a length constraint to the compaction prompt.
 - Truncates compaction output so the summary never exceeds the limit.
+- Triggers compaction when tool output is too large.
 
 ## Loading
 
@@ -26,6 +27,8 @@ Optional environment overrides:
 - `OPENCODE_COMPACTION_MAX_TOKENS` (hard cap, applied first)
 - `OPENCODE_COMPACTION_RESERVE_TOKENS` (reserved tokens to subtract)
 - `OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX` (global output cap, default 32000)
+- `OPENCODE_TOOL_OUTPUT_COMPACT_TOKENS` (trigger threshold for tool output)
+- `OPENCODE_TOOL_OUTPUT_COMPACT_COOLDOWN_MS` (minimum time between triggers, default 60000)
 
 ## Notes
 

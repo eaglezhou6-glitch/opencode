@@ -3,6 +3,9 @@ import type { Plugin } from "@opencode-ai/plugin"
 
 const CHARS_PER_TOKEN = 4
 const OUTPUT_TOKEN_MAX = 32_000
+const TOOL_OUTPUT_MAX = 8_000
+const TOOL_OUTPUT_MIN = 1_000
+const TOOL_OUTPUT_COOLDOWN = 60_000
 const NOTE = "Keep the summary concise and focused on continuation. Prefer short bullet points. Use plain text only."
 
 const num = (value?: string) => {
@@ -36,6 +39,17 @@ const bound = (model: Model) => {
   return value
 }
 
+const toolCap = (model: Model) => {
+  const hard = num(Bun.env.OPENCODE_TOOL_OUTPUT_COMPACT_TOKENS)
+  if (hard) return hard
+  const base = bound(model)
+  if (!base) return TOOL_OUTPUT_MAX
+  const scaled = Math.floor(base / 4)
+  return Math.min(TOOL_OUTPUT_MAX, Math.max(TOOL_OUTPUT_MIN, scaled))
+}
+
+const cooldown = () => num(Bun.env.OPENCODE_TOOL_OUTPUT_COMPACT_COOLDOWN_MS) ?? TOOL_OUTPUT_COOLDOWN
+
 const note = (limit?: number) => {
   if (!limit) return NOTE
   return [NOTE, `Hard limit: ${limit} tokens. If you get close, drop lower-priority details.`].join("\n\n")
@@ -44,6 +58,8 @@ const note = (limit?: number) => {
 export const CompactionLimitPlugin: Plugin = async (ctx) => {
   const state = {
     providers: undefined as Provider[] | undefined,
+    inflight: new Set<string>(),
+    last: new Map<string, number>(),
   }
 
   const list = async () => {
@@ -61,7 +77,7 @@ export const CompactionLimitPlugin: Plugin = async (ctx) => {
     return provider.models[modelID]
   }
 
-  const cap = async (sessionID: string) => {
+  const sessionModel = async (sessionID: string) => {
     const msgs = await ctx.client.session.messages({
       path: { id: sessionID },
       query: { limit: 50 },
@@ -73,7 +89,36 @@ export const CompactionLimitPlugin: Plugin = async (ctx) => {
     const info = user.info.model
     const current = await model(info.providerID, info.modelID)
     if (!current) return
-    return bound(current)
+    return { info, current }
+  }
+
+  const cap = async (sessionID: string) => {
+    const data = await sessionModel(sessionID)
+    if (!data) return
+    return bound(data.current)
+  }
+
+  const trigger = async (sessionID: string) => {
+    const now = Date.now()
+    const last = state.last.get(sessionID)
+    const wait = cooldown()
+    if (last && now - last < wait) return
+    if (state.inflight.has(sessionID)) return
+    const data = await sessionModel(sessionID)
+    if (!data) return
+    state.inflight.add(sessionID)
+    state.last.set(sessionID, now)
+    await ctx.client.session
+      .summarize({
+        path: { id: sessionID },
+        body: {
+          providerID: data.info.providerID,
+          modelID: data.info.modelID,
+          auto: true,
+        },
+      })
+      .catch(() => {})
+    state.inflight.delete(sessionID)
   }
 
   return {
@@ -102,6 +147,15 @@ export const CompactionLimitPlugin: Plugin = async (ctx) => {
       const text = trim(output.text, limit)
       if (text === output.text) return
       output.text = text
+    },
+    "tool.execute.after": async (input, output) => {
+      if (!output.output) return
+      const data = await sessionModel(input.sessionID)
+      if (!data) return
+      const limit = toolCap(data.current)
+      const size = tokens(output.output)
+      if (size <= limit) return
+      await trigger(input.sessionID)
     },
   }
 }
