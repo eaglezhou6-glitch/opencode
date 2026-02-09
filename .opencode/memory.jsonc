@@ -26,6 +26,13 @@
     "minScore": 0.35,
     "snippetChars": 700
   },
+  "recall": {
+    "enabled": true,
+    "maxResults": 6,
+    "minScore": 0.35,
+    "maxChars": 1600,
+    "includePath": true
+  },
   "flush": {
     "enabled": true,
     "mode": "llm",

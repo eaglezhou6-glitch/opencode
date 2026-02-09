@@ -1,5 +1,5 @@
 import type { Plugin } from "@opencode-ai/plugin"
-import { appendMemory, resolveMemoryConfig } from "../lib/memory"
+import { appendMemory, resolveMemoryConfig, searchMemory } from "../lib/memory"
 
 type MessageEntry = {
   info?: { role?: string }
@@ -10,6 +10,15 @@ type MemoryNotes = {
   longTerm: string[]
   daily: string[]
 }
+
+type RecallEntry = {
+  messageID: string
+  text: string
+  createdAt: number
+}
+
+const RECALL_TTL_MS = 5 * 60 * 1000
+const RECALL_CACHE = new Map<string, RecallEntry>()
 
 export const MemoryPlugin: Plugin = async ({ client, worktree }) => {
   const log = (level: "debug" | "info" | "warn" | "error", message: string, extra?: object) => {
@@ -26,6 +35,62 @@ export const MemoryPlugin: Plugin = async ({ client, worktree }) => {
   }
 
   return {
+    "chat.message": async (input, output) => {
+      const msg = output.message
+      if (msg.role !== "user") {
+        return
+      }
+      if (msg.agent === "compaction" || msg.agent === "summary" || msg.agent === "title") {
+        return
+      }
+
+      const cfg = await resolveMemoryConfig(worktree)
+      if (!cfg.recall.enabled) {
+        return
+      }
+
+      const query = buildQuery(output.parts)
+      if (!query || query.length < 4) {
+        return
+      }
+
+      const searched = await searchMemory({
+        cfg,
+        query,
+        maxResults: cfg.recall.maxResults,
+        minScore: cfg.recall.minScore,
+      }).catch(() => null)
+      const results = searched?.results ?? []
+      if (results.length === 0) {
+        return
+      }
+
+      const text = formatRecall(cfg, results)
+      if (!text) {
+        return
+      }
+
+      RECALL_CACHE.set(input.sessionID, {
+        messageID: msg.id,
+        text,
+        createdAt: Date.now(),
+      })
+    },
+    "experimental.chat.system.transform": async (input, output) => {
+      if (!input.sessionID) {
+        return
+      }
+      const entry = RECALL_CACHE.get(input.sessionID)
+      if (!entry) {
+        return
+      }
+      if (Date.now() - entry.createdAt > RECALL_TTL_MS) {
+        RECALL_CACHE.delete(input.sessionID)
+        return
+      }
+      output.system.push(entry.text)
+      RECALL_CACHE.delete(input.sessionID)
+    },
     "experimental.session.compacting": async (input) => {
       const cfg = await resolveMemoryConfig(worktree)
       if (!cfg.flush.enabled) {
@@ -115,6 +180,24 @@ function readTextPart(part: unknown) {
   return text ? text : null
 }
 
+function buildQuery(parts: unknown[]) {
+  const lines = (parts ?? [])
+    .map((part) => readTextPart(part))
+    .filter(Boolean) as string[]
+  if (lines.length === 0) {
+    return ""
+  }
+  const joined = lines.join("\n").trim()
+  if (!joined) {
+    return ""
+  }
+  const maxChars = 4000
+  if (joined.length <= maxChars) {
+    return joined
+  }
+  return joined.slice(0, maxChars)
+}
+
 function extractHeuristic(transcript: string): MemoryNotes {
   const lines = transcript
     .split("\n")
@@ -152,6 +235,43 @@ async function resolveNotes(
   }
   log("warn", "memory flush LLM failed, falling back to heuristics")
   return extractHeuristic(transcript)
+}
+
+function formatRecall(
+  cfg: Awaited<ReturnType<typeof resolveMemoryConfig>>,
+  results: Array<{ path: string; startLine: number; endLine: number; snippet: string }>,
+) {
+  if (results.length === 0) {
+    return ""
+  }
+  const lines = ["<memory>", "Relevant memory notes:"]
+  let remaining = cfg.recall.maxChars - lines.join("\n").length - 1
+  if (remaining <= 0) {
+    return ""
+  }
+  for (const result of results) {
+    const snippet = result.snippet.trim()
+    if (!snippet) {
+      continue
+    }
+    const source = cfg.recall.includePath
+      ? `\n  Source: ${result.path}#L${result.startLine}-${result.endLine}`
+      : ""
+    let entry = `- ${snippet}${source}`
+    if (entry.length > remaining) {
+      entry = entry.slice(0, Math.max(0, remaining))
+    }
+    if (!entry) {
+      break
+    }
+    lines.push(entry)
+    remaining -= entry.length + 1
+    if (remaining <= 0) {
+      break
+    }
+  }
+  lines.push("</memory>")
+  return lines.join("\n")
 }
 
 async function extractWithLlm(cfg: Awaited<ReturnType<typeof resolveMemoryConfig>>, transcript: string) {

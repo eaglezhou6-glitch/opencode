@@ -42,6 +42,13 @@ export type ResolvedMemoryConfig = {
     minScore: number
     snippetChars: number
   }
+  recall: {
+    enabled: boolean
+    maxResults: number
+    minScore: number
+    maxChars: number
+    includePath: boolean
+  }
   flush: {
     enabled: boolean
     mode: "llm" | "heuristic"
@@ -132,6 +139,13 @@ const DEFAULT_CONFIG = {
     minScore: 0.35,
     snippetChars: 700,
   },
+  recall: {
+    enabled: true,
+    maxResults: 6,
+    minScore: 0.35,
+    maxChars: 1600,
+    includePath: true,
+  },
   flush: {
     enabled: true,
     mode: "llm",
@@ -213,6 +227,25 @@ export async function resolveMemoryConfig(worktree: string): Promise<ResolvedMem
     2000,
   )
 
+  const recall = isRecord(raw.recall) ? raw.recall : {}
+  const recallEnabled = readBool(recall.enabled) ?? DEFAULT_CONFIG.recall.enabled
+  const recallMaxResults = clampInt(
+    readNumber(recall.maxResults) ?? maxResults ?? DEFAULT_CONFIG.recall.maxResults,
+    1,
+    20,
+  )
+  const recallMinScore = clampNumber(
+    readNumber(recall.minScore) ?? minScore ?? DEFAULT_CONFIG.recall.minScore,
+    0,
+    1,
+  )
+  const recallMaxChars = clampInt(
+    readNumber(recall.maxChars) ?? DEFAULT_CONFIG.recall.maxChars,
+    200,
+    8000,
+  )
+  const recallIncludePath = readBool(recall.includePath) ?? DEFAULT_CONFIG.recall.includePath
+
   const flush = isRecord(raw.flush) ? raw.flush : {}
   const flushEnabled = readBool(flush.enabled) ?? DEFAULT_CONFIG.flush.enabled
   const flushModeRaw = readString(flush.mode) ?? DEFAULT_CONFIG.flush.mode
@@ -262,6 +295,13 @@ export async function resolveMemoryConfig(worktree: string): Promise<ResolvedMem
       maxResults,
       minScore,
       snippetChars,
+    },
+    recall: {
+      enabled: recallEnabled,
+      maxResults: recallMaxResults,
+      minScore: recallMinScore,
+      maxChars: recallMaxChars,
+      includePath: recallIncludePath,
     },
     flush: {
       enabled: flushEnabled,
