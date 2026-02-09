@@ -1,5 +1,7 @@
 import type { Model, Provider } from "@opencode-ai/sdk"
 import type { Plugin } from "@opencode-ai/plugin"
+import fs from "fs/promises"
+import path from "path"
 
 const CHARS_PER_TOKEN = 4
 const OUTPUT_TOKEN_MAX = 32_000
@@ -50,6 +52,88 @@ const toolCap = (model: Model) => {
 
 const cooldown = () => num(Bun.env.OPENCODE_TOOL_OUTPUT_COMPACT_COOLDOWN_MS) ?? TOOL_OUTPUT_COOLDOWN
 
+const pad = (value: number) => value.toString().padStart(2, "0")
+
+const day = (value = new Date()) => {
+  const year = value.getFullYear()
+  const month = pad(value.getMonth() + 1)
+  const date = pad(value.getDate())
+  return `${year}-${month}-${date}`
+}
+
+const name = (info: any) => {
+  if (info?.model?.providerID && info?.model?.modelID) {
+    return `${info.model.providerID}/${info.model.modelID}`
+  }
+  if (info?.providerID && info?.modelID) {
+    return `${info.providerID}/${info.modelID}`
+  }
+}
+
+const json = (value: unknown) => {
+  if (value === undefined) return ""
+  if (value === null) return ""
+  if (typeof value === "string") return value
+  return JSON.stringify(value, null, 2)
+}
+
+const part = (item: any) => {
+  if (!item) return ""
+  if (item.type === "text") return `#### text\n\n${item.text ?? ""}`.trim()
+  if (item.type === "reasoning") return `#### reasoning\n\n${item.text ?? ""}`.trim()
+  if (item.type !== "tool") {
+    const raw = json(item)
+    if (!raw) return ""
+    return `#### ${item.type}\n\n\`\`\`json\n${raw}\n\`\`\``
+  }
+  const state = item.state ?? {}
+  const header = [`tool: ${item.tool ?? "unknown"}`, state.status ? `status: ${state.status}` : ""]
+    .filter((value) => value)
+    .join(" | ")
+  const input = json(state.input)
+  const output = json(state.output)
+  const meta = json(state.metadata)
+  const bits = [
+    `#### tool\n\n${header}`,
+    input ? `\n\ninput:\n\`\`\`json\n${input}\n\`\`\`` : "",
+    output ? `\n\noutput:\n\`\`\`\n${output}\n\`\`\`` : "",
+    meta ? `\n\nmetadata:\n\`\`\`json\n${meta}\n\`\`\`` : "",
+  ].filter((value) => value)
+  return bits.join("")
+}
+
+const message = (item: any) => {
+  if (!item?.info) return ""
+  const info = item.info
+  const meta = [
+    info.summary ? "summary" : "",
+    name(info),
+    info.time?.created ? new Date(info.time.created).toISOString() : "",
+  ].filter((value) => value)
+  const parts = (item.parts ?? []).map(part).filter((value) => value)
+  const header = `### ${info.role} ${info.id}`
+  const extra = meta.length ? `\n\n- ${meta.join(" | ")}` : ""
+  const body = parts.length ? `\n\n${parts.join("\n\n")}` : ""
+  return `${header}${extra}${body}`.trim()
+}
+
+const snapshot = async (root: string, sessionID: string, items: any[]) => {
+  if (items.length === 0) return
+  const dir = path.join(root, "memory")
+  await fs.mkdir(dir, { recursive: true }).catch(() => {})
+  const file = path.join(dir, `${day()}.md`)
+  const exists = await Bun.file(file).exists().catch(() => false)
+  const header = exists ? "" : `# ${day()}\n`
+  const now = new Date().toISOString()
+  const body = [
+    header,
+    `\n## Session ${sessionID} @ ${now}\n`,
+    ...items.map(message).filter((value) => value),
+    "\n---\n",
+  ].join("\n")
+  await fs.appendFile(file, body, "utf8").catch(() => {})
+}
+
 const note = (limit?: number) => {
   if (!limit) return NOTE
   return [NOTE, `Hard limit: ${limit} tokens. If you get close, drop lower-priority details.`].join("\n\n")
@@ -60,6 +144,7 @@ export const CompactionLimitPlugin: Plugin = async (ctx) => {
     providers: undefined as Provider[] | undefined,
     inflight: new Set<string>(),
     last: new Map<string, number>(),
+    memory: new Map<string, string>(),
   }
 
   const list = async () => {
@@ -90,6 +175,19 @@ export const CompactionLimitPlugin: Plugin = async (ctx) => {
     const current = await model(info.providerID, info.modelID)
     if (!current) return
     return { info, current }
+  }
+
+  const remember = async (sessionID: string) => {
+    const msgs = await ctx.client.session.messages({
+      path: { id: sessionID },
+      responseStyle: "data",
+    })
+    if (!msgs || msgs.length === 0) return
+    const tail = msgs[msgs.length - 1]?.info?.id
+    if (!tail) return
+    if (state.memory.get(sessionID) === tail) return
+    state.memory.set(sessionID, tail)
+    await snapshot(ctx.worktree, sessionID, msgs)
   }
 
   const cap = async (sessionID: string) => {
@@ -123,6 +221,7 @@ export const CompactionLimitPlugin: Plugin = async (ctx) => {
 
   return {
     "experimental.session.compacting": async (input, output) => {
+      await remember(input.sessionID)
       const limit = await cap(input.sessionID)
       const extra = note(limit)
       if (output.prompt) {

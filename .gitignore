@@ -9,6 +9,7 @@ node_modules
 *~
 playground
 tmp
+memory/
 dist
 ts-dist
 .turbo

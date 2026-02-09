@@ -5,6 +5,7 @@ This plugin enforces a hard size limit for compaction summaries. It:
 - Adds a length constraint to the compaction prompt.
 - Truncates compaction output so the summary never exceeds the limit.
 - Triggers compaction when tool output is too large.
+- Saves the current conversation to `memory/YYYY-MM-DD.md` before compaction.
 
 ## Loading
 
@@ -33,3 +34,6 @@ Optional environment overrides:
 ## Notes
 
 Token limits are estimated using `4 chars ~= 1 token`, matching core logic.
+
+The memory snapshot is appended per compaction event and stored at the repository
+root under `memory/`. Consider adding `memory/` to your `.gitignore`.
