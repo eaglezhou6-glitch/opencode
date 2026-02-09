@@ -1,3 +1,5 @@
 plans/
 bun.lock
 package.json
+MEMORY.md
+memory/
