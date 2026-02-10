@@ -9,7 +9,7 @@ const OUTPUT_TOKEN_MAX = 32_000
 const TOOL_OUTPUT_MAX = 8_000
 const TOOL_OUTPUT_MIN = 1_000
 const TOOL_OUTPUT_COOLDOWN = 60_000
-const NOTE = "Keep the summary concise and focused on continuation. Prefer short bullet points. Use plain text only."
+const NOTE = "总结上面的内容"
 
 const num = (value?: string) => {
   if (!value) return
