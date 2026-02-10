@@ -4,6 +4,7 @@ import fs from "fs/promises"
 import path from "path"
 
 const CHARS_PER_TOKEN = 4
+const CJK_RE = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]/g
 const OUTPUT_TOKEN_MAX = 32_000
 const TOOL_OUTPUT_MAX = 8_000
 const TOOL_OUTPUT_MIN = 1_000
@@ -18,7 +19,11 @@ const num = (value?: string) => {
   return Math.floor(next)
 }
 
-const tokens = (text: string) => Math.max(0, Math.round(text.length / CHARS_PER_TOKEN))
+const tokens = (text: string) => {
+  const base = Math.max(0, Math.round(text.length / CHARS_PER_TOKEN))
+  const cjk = text.match(CJK_RE)?.length ?? 0
+  return Math.max(base, cjk)
+}
 
 const trim = (text: string, limit: number) => {
   if (limit <= 0) return ""
@@ -219,6 +224,30 @@ export const CompactionLimitPlugin: Plugin = async (ctx) => {
     state.inflight.delete(sessionID)
   }
 
+  const contextTokens = async (sessionID: string) => {
+    const limit = num(Bun.env.OPENCODE_TOOL_OUTPUT_CONTEXT_MESSAGES)
+    const query = limit ? { limit } : undefined
+    const msgs = await ctx.client.session
+      .messages({
+        path: { id: sessionID },
+        query,
+        responseStyle: "data",
+      })
+      .catch(() => [])
+    const items = Array.isArray(msgs) ? msgs : []
+    if (items.length === 0) return 0
+    const text = items
+      .map((item) => {
+        const parts = (item?.parts ?? []).map(part).filter((value) => value)
+        if (parts.length === 0) return ""
+        return parts.join("\n\n")
+      })
+      .filter((value) => value)
+      .join("\n\n")
+    if (!text) return 0
+    return tokens(text)
+  }
+
   return {
     "experimental.session.compacting": async (input, output) => {
       await remember(input.sessionID)
@@ -253,7 +282,14 @@ export const CompactionLimitPlugin: Plugin = async (ctx) => {
       if (!data) return
       const limit = toolCap(data.current)
       const size = tokens(output.output)
-      if (size <= limit) return
+      if (size > limit) {
+        await trigger(input.sessionID)
+        return
+      }
+      const max = bound(data.current)
+      if (!max) return
+      const used = await contextTokens(input.sessionID)
+      if (used + size <= max) return
       await trigger(input.sessionID)
     },
   }
