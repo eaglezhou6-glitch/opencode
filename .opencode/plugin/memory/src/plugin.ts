@@ -1,5 +1,5 @@
 import type { Plugin } from "@opencode-ai/plugin"
-import { appendMemory, resolveMemoryConfig, searchMemory } from "./memory"
+import { appendMemory, appendSessionSummary, resolveMemoryConfig, searchMemory } from "./memory"
 
 type MessageEntry = {
   info?: { role?: string }
@@ -26,6 +26,7 @@ type ProviderEntry = {
   id: string
   key?: string
   options?: Record<string, unknown>
+  models?: Record<string, { limit?: { context?: number } }>
 }
 
 type FlushOverride = {
@@ -111,6 +112,50 @@ export const MemoryPlugin: Plugin = async ({ client, worktree }) => {
       }
       output.system.push(entry.text)
       RECALL_CACHE.delete(input.sessionID)
+    },
+    "experimental.text.complete": async (input, output) => {
+      if (!input.sessionID) {
+        return
+      }
+      const info = await fetchMessageInfo(client, input.sessionID, input.messageID).catch(() => null)
+      if (!info) {
+        return
+      }
+      if (info.role !== "assistant") {
+        return
+      }
+      if (info.agent !== "compaction" && info.mode !== "compaction") {
+        return
+      }
+      if (!info.providerID || !info.modelID) {
+        return
+      }
+      const cfg = await resolveMemoryConfig(worktree)
+      const limit = await resolveModelContextLimit(client, {
+        providerID: info.providerID,
+        modelID: info.modelID,
+      })
+      if (!limit) {
+        return
+      }
+      const estimate = estimateTokens(output.text)
+      if (estimate <= limit) {
+        return
+      }
+      const now = new Date()
+      const date = now.toISOString().split("T")[0]
+      await appendSessionSummary({
+        cfg,
+        sessionID: input.sessionID,
+        messageID: input.messageID,
+        text: output.text,
+        now,
+      }).catch(() => {})
+      const notice = `\n\n【已截断】压缩结果超过上下文长度，完整内容请查看 session-${date}.md。`
+      const maxChars = Math.max(200, Math.floor(limit * 4))
+      const reserved = Math.min(maxChars, notice.length)
+      const bodyLimit = Math.max(0, maxChars - reserved)
+      output.text = `${output.text.slice(0, bodyLimit).trimEnd()}${notice}`
     },
     "experimental.session.compacting": async (input) => {
       const cfg = await resolveMemoryConfig(worktree)
@@ -469,6 +514,52 @@ function parseModelRef(model: string): ModelRef | null {
   return { providerID, modelID }
 }
 
+async function fetchMessageInfo(
+  client: {
+    session: { message: (input: any) => Promise<{ data?: { info?: Record<string, unknown> } }> }
+  },
+  sessionID: string,
+  messageID: string,
+) {
+  const res = await client.session.message({
+    path: { id: sessionID, messageID },
+    responseStyle: "data",
+  })
+  const info = (res as { data?: { info?: Record<string, unknown> } }).data?.info
+  if (!info) {
+    return null
+  }
+  return info as {
+    role?: string
+    agent?: string
+    mode?: string
+    providerID?: string
+    modelID?: string
+  }
+}
+
+async function resolveModelContextLimit(
+  client: {
+    config: {
+      get: (input?: any) => Promise<{ data?: Record<string, unknown> }>
+      providers: (input?: any) => Promise<{ data?: { providers?: ProviderEntry[] } }>
+    }
+  },
+  ref: ModelRef,
+) {
+  const snapshot = await getConfigSnapshot(client).catch(() => null)
+  if (!snapshot) {
+    return null
+  }
+  const provider = snapshot.providers.find((entry) => entry.id === ref.providerID)
+  const model = provider?.models?.[ref.modelID]
+  const limit = model?.limit?.context
+  if (typeof limit === "number" && limit > 0) {
+    return limit
+  }
+  return null
+}
+
 function parseNotes(text: string): MemoryNotes | null {
   if (text.includes("NO_MEMORY")) {
     return { longTerm: [], daily: [] }
@@ -565,4 +656,11 @@ function uniqueNotes(items: string[], limit: number) {
     }
   }
   return out
+}
+
+function estimateTokens(text: string) {
+  if (!text) {
+    return 0
+  }
+  return Math.ceil(text.length / 4)
 }

@@ -361,6 +361,40 @@ export async function appendMemory(params: {
   return { path: relPath, added: unique }
 }
 
+export async function appendSessionSummary(params: {
+  cfg: ResolvedMemoryConfig
+  sessionID: string
+  messageID?: string
+  text: string
+  now?: Date
+}) {
+  const cfg = params.cfg
+  const text = params.text.trim()
+  if (!text) {
+    return { path: "" }
+  }
+  await ensureMemoryDirs(cfg)
+
+  const now = params.now ?? new Date()
+  const stamp = `${now.toISOString().replace("T", " ").split(".")[0]} UTC`
+  const date = now.toISOString().split("T")[0]
+  const filePath = path.join(cfg.paths.rootDir, `session-${date}.md`)
+  const relPath = normalizeRelPath(cfg, filePath)
+
+  const header = (await exists(filePath)) ? "\n" : `# ${date}\n\n`
+  const lines = [
+    header,
+    `### ${stamp}`,
+    `- Session ID: ${params.sessionID}`,
+    params.messageID ? `- Message ID: ${params.messageID}` : null,
+    "",
+    text,
+    "",
+  ].filter((entry): entry is string => Boolean(entry))
+  await fs.appendFile(filePath, lines.join("\n"), "utf-8")
+  return { path: relPath }
+}
+
 export async function readMemoryFile(params: {
   cfg: ResolvedMemoryConfig
   path: string
@@ -841,6 +875,9 @@ async function resolveAllowedPath(cfg: ResolvedMemoryConfig, rawPath: string) {
     if (absPath.startsWith(`${cfg.paths.dailyDir}${path.sep}`)) {
       return { absPath, relPath: normalizeRelPath(cfg, absPath) }
     }
+    if (isSessionFile(cfg, absPath)) {
+      return { absPath, relPath: normalizeRelPath(cfg, absPath) }
+    }
     for (const extra of cfg.paths.extraPaths) {
       const extraStat = await fs.lstat(extra).catch(() => null)
       if (!extraStat || extraStat.isSymbolicLink()) {
@@ -1019,6 +1056,15 @@ function resolvePathCandidates(cfg: ResolvedMemoryConfig, input: string) {
 
 function samePath(a: string, b: string) {
   return path.resolve(a) === path.resolve(b)
+}
+
+function isSessionFile(cfg: ResolvedMemoryConfig, absPath: string) {
+  const root = path.resolve(cfg.paths.rootDir)
+  const dir = path.dirname(absPath)
+  if (!samePath(dir, root)) {
+    return false
+  }
+  return /^session-\d{4}-\d{2}-\d{2}\.md$/.test(path.basename(absPath))
 }
 
 function resolveApiKey(value?: string) {
