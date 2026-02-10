@@ -251,13 +251,7 @@ export const CompactionLimitPlugin: Plugin = async (ctx) => {
   return {
     "experimental.session.compacting": async (input, output) => {
       await remember(input.sessionID)
-      const limit = await cap(input.sessionID)
-      const extra = note(limit)
-      if (output.prompt) {
-        output.prompt = [output.prompt, extra].join("\n\n")
-        return
-      }
-      output.context.push(extra)
+      output.prompt = NOTE
     },
     "experimental.text.complete": async (input, output) => {
       const msg = await ctx.client.session.message({
