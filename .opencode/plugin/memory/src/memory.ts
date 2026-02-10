@@ -52,7 +52,7 @@ export type ResolvedMemoryConfig = {
   flush: {
     enabled: boolean
     mode: "llm" | "heuristic"
-    useCompactionModel: boolean
+    provider?: string
     model: string
     baseUrl: string
     apiKey?: string
@@ -150,10 +150,10 @@ const DEFAULT_CONFIG = {
   flush: {
     enabled: true,
     mode: "llm",
-    useCompactionModel: true,
-    model: "gpt-4o-mini",
-    baseUrl: "",
-    apiKey: "",
+    provider: "",
+    model: "",
+    baseUrl: "https://api.openai.com/v1",
+    apiKey: "env:OPENAI_API_KEY",
     headers: {} as Record<string, string>,
     maxMessages: 50,
     maxItems: 6,
@@ -252,8 +252,7 @@ export async function resolveMemoryConfig(worktree: string): Promise<ResolvedMem
   const flushEnabled = readBool(flush.enabled) ?? DEFAULT_CONFIG.flush.enabled
   const flushModeRaw = readString(flush.mode) ?? DEFAULT_CONFIG.flush.mode
   const flushMode = flushModeRaw === "heuristic" ? "heuristic" : "llm"
-  const flushUseCompaction =
-    readBool(flush.useCompactionModel) ?? DEFAULT_CONFIG.flush.useCompactionModel
+  const flushProvider = readString(flush.provider)
   const flushModel = readString(flush.model) ?? DEFAULT_CONFIG.flush.model
   const flushBase = readString(flush.baseUrl) ?? DEFAULT_CONFIG.flush.baseUrl
   const flushApiRaw = readString(flush.apiKey) ?? DEFAULT_CONFIG.flush.apiKey
@@ -270,8 +269,8 @@ export async function resolveMemoryConfig(worktree: string): Promise<ResolvedMem
   )
   const flushSystem = readString(flush.systemPrompt) ?? DEFAULT_CONFIG.flush.systemPrompt
   const flushUser = readString(flush.userPrompt) ?? DEFAULT_CONFIG.flush.userPrompt
-  const resolvedFlushBase = flushBase || embBaseUrl
-  const resolvedFlushApi = resolveApiKey(flushApiRaw) ?? embApiKey
+  const resolvedFlushBase = flushBase
+  const resolvedFlushApi = resolveApiKey(flushApiRaw)
 
   return {
     worktree,
@@ -310,7 +309,7 @@ export async function resolveMemoryConfig(worktree: string): Promise<ResolvedMem
     flush: {
       enabled: flushEnabled,
       mode: flushMode,
-      useCompactionModel: flushUseCompaction,
+      provider: flushProvider,
       model: flushModel,
       baseUrl: resolvedFlushBase,
       apiKey: resolvedFlushApi,

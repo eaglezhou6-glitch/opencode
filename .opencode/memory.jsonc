@@ -36,10 +36,12 @@
   "flush": {
     "enabled": true,
     "mode": "llm",
-    "useCompactionModel": true,
-    "model": "gpt-4o-mini",
-    "baseUrl": "",
-    "apiKey": "",
+    // Optional: override the main model with a provider/model pair.
+    // If "model" is empty, the main model will be used.
+    "provider": "",
+    "model": "",
+    "baseUrl": "https://api.openai.com/v1",
+    "apiKey": "env:OPENAI_API_KEY",
     "headers": {},
     "maxMessages": 50,
     "maxItems": 6

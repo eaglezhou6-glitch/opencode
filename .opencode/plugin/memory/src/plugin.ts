@@ -26,20 +26,26 @@ type ProviderEntry = {
   id: string
   key?: string
   options?: Record<string, unknown>
+  models?: Record<string, unknown>
 }
 
-type FlushOverride = {
+type ConfigSnapshot = {
+  model?: string
+  providers: ProviderEntry[]
+}
+
+type FlushTarget = {
   model: string
   baseUrl: string
-  apiKey?: string
-  headers?: Record<string, string>
+  apiKey: string
+  headers: Record<string, string>
 }
 
 const RECALL_TTL_MS = 5 * 60 * 1000
 const RECALL_CACHE = new Map<string, RecallEntry>()
+
 const CONFIG_TTL_MS = 60 * 1000
-let CONFIG_CACHE: { at: number; config: Record<string, unknown>; providers: ProviderEntry[] } | null =
-  null
+let CONFIG_CACHE: { at: number; snapshot: ConfigSnapshot } | null = null
 
 export const MemoryPlugin: Plugin = async ({ client, worktree }) => {
   const log = (level: "debug" | "info" | "warn" | "error", message: string, extra?: object) => {
@@ -132,10 +138,7 @@ export const MemoryPlugin: Plugin = async ({ client, worktree }) => {
         return
       }
 
-      const override = cfg.flush.useCompactionModel
-        ? await resolveFlushOverride(client, data, log)
-        : null
-      const notes = await resolveNotes(cfg, transcript, log, override)
+      const notes = await resolveNotes(client, cfg, transcript, log)
       if (!notes) {
         return
       }
@@ -256,19 +259,15 @@ function extractHeuristic(transcript: string): MemoryNotes {
 }
 
 async function resolveNotes(
+  client: Parameters<Plugin>[0]["client"],
   cfg: Awaited<ReturnType<typeof resolveMemoryConfig>>,
   transcript: string,
   log: (level: "debug" | "info" | "warn" | "error", message: string, extra?: object) => void,
-  override?: FlushOverride | null,
 ) {
   if (cfg.flush.mode === "heuristic") {
     return extractHeuristic(transcript)
   }
-  if (cfg.flush.useCompactionModel && !override) {
-    log("warn", "memory flush compaction model unavailable, falling back to heuristics")
-    return extractHeuristic(transcript)
-  }
-  const llm = await extractWithLlm(cfg, transcript, override ?? undefined).catch(() => null)
+  const llm = await extractWithLlm(client, cfg, transcript, log).catch(() => null)
   if (llm) {
     return llm
   }
@@ -314,27 +313,27 @@ function formatRecall(
 }
 
 async function extractWithLlm(
+  client: Parameters<Plugin>[0]["client"],
   cfg: Awaited<ReturnType<typeof resolveMemoryConfig>>,
   transcript: string,
-  override?: FlushOverride,
+  log: (level: "debug" | "info" | "warn" | "error", message: string, extra?: object) => void,
 ) {
-  const apiKey = override?.apiKey ?? cfg.flush.apiKey
-  if (!apiKey) {
+  const target = await resolveFlushTarget(client, cfg, log)
+  if (!target) {
     return null
   }
-  const baseUrl = (override?.baseUrl ?? cfg.flush.baseUrl).replace(/\/+$/, "")
+  const baseUrl = target.baseUrl.replace(/\/+$/, "")
   if (!baseUrl) {
     return null
   }
   const url = `${baseUrl}/chat/completions`
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
-    Authorization: `Bearer ${apiKey}`,
-    ...cfg.flush.headers,
-    ...(override?.headers ?? {}),
+    Authorization: `Bearer ${target.apiKey}`,
+    ...target.headers,
   }
   const body = {
-    model: override?.model ?? cfg.flush.model,
+    model: target.model,
     temperature: 0.2,
     messages: [
       { role: "system", content: cfg.flush.systemPrompt },
@@ -360,113 +359,160 @@ async function extractWithLlm(
   return notes
 }
 
-async function resolveFlushOverride(
-  client: {
-    config: {
-      get: (input?: any) => Promise<{ data?: Record<string, unknown> }>
-      providers: (input?: any) => Promise<{ data?: { providers?: ProviderEntry[] } }>
-    }
-  },
-  entries: MessageEntry[],
+async function resolveFlushTarget(
+  client: Parameters<Plugin>[0]["client"],
+  cfg: Awaited<ReturnType<typeof resolveMemoryConfig>>,
   log: (level: "debug" | "info" | "warn" | "error", message: string, extra?: object) => void,
 ) {
-  const snapshot = await getConfigSnapshot(client).catch(() => null)
-  if (!snapshot) {
+  const snapshot = await getConfigSnapshot(client)
+  const candidates = buildCandidates(cfg, snapshot.model)
+  if (candidates.length === 0) {
+    log("warn", "memory flush model is missing", {})
     return null
   }
-  const compactionModel = resolveCompactionModel(snapshot.config, entries)
-  if (!compactionModel) {
-    return null
+  const match = pickCandidate(snapshot.providers, candidates)
+  if (!match) {
+    log("warn", "memory flush model not found in providers", { candidates })
+    return fallbackTarget(cfg)
   }
-  const provider = snapshot.providers.find((entry) => entry.id === compactionModel.providerID)
-  const baseUrl =
-    readString(provider?.options?.baseURL) ??
-    readString(provider?.options?.baseUrl) ??
-    (compactionModel.providerID === "openai" ? "https://api.openai.com/v1" : "")
-  const apiKey = provider?.key
-  if (!baseUrl || !apiKey) {
-    log("warn", "memory flush compaction model not usable, missing baseUrl/apiKey", {
-      providerID: compactionModel.providerID,
-    })
-    return null
+  const provider = match.provider
+  const baseUrl = resolveBaseUrl(provider, cfg)
+  if (!baseUrl) {
+    log("warn", "memory flush baseUrl missing", { provider: provider.id })
+    return fallbackTarget(cfg)
   }
-  const headers = readStringMap(provider?.options?.headers) ?? {}
+  const apiKey = readString(provider.key) ?? cfg.flush.apiKey
+  if (!apiKey) {
+    log("warn", "memory flush apiKey missing", { provider: provider.id })
+    return fallbackTarget(cfg)
+  }
+  const baseHeaders = readStringMap(provider.options?.headers) ?? {}
+  const headers = { ...baseHeaders, ...cfg.flush.headers }
   return {
-    model: compactionModel.modelID,
+    model: match.ref.modelID,
     baseUrl,
     apiKey,
     headers,
   }
 }
 
-async function getConfigSnapshot(client: {
-  config: {
-    get: (input?: any) => Promise<{ data?: Record<string, unknown> }>
-    providers: (input?: any) => Promise<{ data?: { providers?: ProviderEntry[] } }>
+function buildCandidates(
+  cfg: Awaited<ReturnType<typeof resolveMemoryConfig>>,
+  mainModel: string | undefined,
+) {
+  const items: ModelRef[] = []
+  const model = readString(cfg.flush.model)
+  if (model) {
+    const parsed = parseModelRef(model)
+    if (parsed) {
+      items.push(parsed)
+    }
+    if (!parsed && cfg.flush.provider) {
+      items.push({ providerID: cfg.flush.provider, modelID: model })
+    }
+    if (!parsed && !cfg.flush.provider) {
+      const main = mainModel ? parseModelRef(mainModel) : null
+      if (main) {
+        items.push({ providerID: main.providerID, modelID: model })
+      }
+    }
+    return items
   }
-}) {
+  const main = mainModel ? parseModelRef(mainModel) : null
+  if (main) {
+    items.push(main)
+  }
+  return items
+}
+
+function pickCandidate(providers: ProviderEntry[], refs: ModelRef[]) {
+  const match = refs
+    .map((ref) => ({ ref, provider: providers.find((item) => item.id === ref.providerID) }))
+    .find((entry) => entry.provider && hasModel(entry.provider, entry.ref.modelID))
+  if (!match || !match.provider) {
+    return null
+  }
+  return match
+}
+
+function hasModel(provider: ProviderEntry, modelID: string) {
+  if (!provider.models) {
+    return false
+  }
+  return Boolean(provider.models[modelID])
+}
+
+function resolveBaseUrl(provider: ProviderEntry, cfg: Awaited<ReturnType<typeof resolveMemoryConfig>>) {
+  const baseUrl = readString(provider.options?.baseURL) ?? readString(provider.options?.baseUrl)
+  if (baseUrl) {
+    return baseUrl
+  }
+  if (provider.id === "openai") {
+    return "https://api.openai.com/v1"
+  }
+  return cfg.flush.baseUrl
+}
+
+function fallbackTarget(cfg: Awaited<ReturnType<typeof resolveMemoryConfig>>): FlushTarget | null {
+  const model = readString(cfg.flush.model)
+  if (!model) {
+    return null
+  }
+  const baseUrl = readString(cfg.flush.baseUrl)
+  if (!baseUrl) {
+    return null
+  }
+  const apiKey = cfg.flush.apiKey
+  if (!apiKey) {
+    return null
+  }
+  return { model, baseUrl, apiKey, headers: cfg.flush.headers ?? {} }
+}
+
+async function getConfigSnapshot(client: Parameters<Plugin>[0]["client"]) {
   if (CONFIG_CACHE && Date.now() - CONFIG_CACHE.at < CONFIG_TTL_MS) {
-    return CONFIG_CACHE
+    return CONFIG_CACHE.snapshot
   }
-  const [configRes, providersRes] = await Promise.all([
-    client.config.get({ responseStyle: "data" }),
-    client.config.providers({ responseStyle: "data" }),
+  const [configRes, providerRes] = await Promise.all([
+    client.config.get({ responseStyle: "data" }).catch(() => null),
+    client.provider.list({ responseStyle: "data" }).catch(() => null),
   ])
-  const config = (configRes as { data?: Record<string, unknown> }).data ?? {}
-  const providers = (providersRes as { data?: { providers?: ProviderEntry[] } }).data?.providers ?? []
-  CONFIG_CACHE = { at: Date.now(), config, providers }
-  return CONFIG_CACHE
+  const config = readRecord(configRes) ?? {}
+  const providers = Array.isArray(providerRes?.all)
+    ? (providerRes?.all as ProviderEntry[])
+    : []
+  const snapshot = {
+    model: readString(config.model),
+    providers,
+  }
+  CONFIG_CACHE = { at: Date.now(), snapshot }
+  return snapshot
 }
 
-function resolveCompactionModel(config: Record<string, unknown>, entries: MessageEntry[]): ModelRef | null {
-  const agent = readRecord(config.agent)
-  const compaction = agent ? readRecord(agent.compaction) : null
-  const compactionModel = compaction ? readString(compaction.model) : undefined
-  if (compactionModel) {
-    return parseModelRef(compactionModel)
+function parseModelRef(value: string) {
+  const raw = value.trim()
+  if (!raw) {
+    return null
   }
-  const userModel = lastUserModel(entries)
-  if (userModel) {
-    return userModel
+  const slash = raw.indexOf("/")
+  if (slash > 0) {
+    const providerID = raw.slice(0, slash).trim()
+    const modelID = raw.slice(slash + 1).trim()
+    if (!providerID || !modelID) {
+      return null
+    }
+    return { providerID, modelID }
   }
-  const defaultModel = readString(config.model)
-  if (defaultModel) {
-    return parseModelRef(defaultModel)
+  const colon = raw.indexOf(":")
+  if (colon > 0) {
+    const providerID = raw.slice(0, colon).trim()
+    const modelID = raw.slice(colon + 1).trim()
+    if (!providerID || !modelID) {
+      return null
+    }
+    return { providerID, modelID }
   }
   return null
-}
-
-function lastUserModel(entries: MessageEntry[]): ModelRef | null {
-  for (let i = entries.length - 1; i >= 0; i -= 1) {
-    const info = entries[i]?.info as Record<string, unknown> | undefined
-    if (!info || info.role !== "user") {
-      continue
-    }
-    const model = readRecord(info.model)
-    const providerID = model ? readString(model.providerID) : undefined
-    const modelID = model ? readString(model.modelID) : undefined
-    if (providerID && modelID) {
-      return { providerID, modelID }
-    }
-  }
-  return null
-}
-
-function parseModelRef(model: string): ModelRef | null {
-  const trimmed = model.trim()
-  if (!trimmed) {
-    return null
-  }
-  const parts = trimmed.split("/")
-  if (parts.length < 2) {
-    return null
-  }
-  const providerID = parts[0]
-  const modelID = parts.slice(1).join("/")
-  if (!providerID || !modelID) {
-    return null
-  }
-  return { providerID, modelID }
 }
 
 
