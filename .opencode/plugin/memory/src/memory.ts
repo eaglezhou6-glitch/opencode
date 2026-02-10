@@ -35,7 +35,6 @@ export type ResolvedMemoryConfig = {
     apiKey?: string
     headers: Record<string, string>
     batchSize: number
-    timeoutMs: number
     providerKey: string
   }
   search: {
@@ -135,7 +134,6 @@ const DEFAULT_CONFIG = {
     apiKey: "env:OPENAI_API_KEY",
     headers: {} as Record<string, string>,
     batchSize: 64,
-    timeoutMs: 15000,
   },
   search: {
     maxResults: 6,
@@ -204,11 +202,6 @@ export async function resolveMemoryConfig(worktree: string): Promise<ResolvedMem
     readNumber(embedding.batchSize) ?? DEFAULT_CONFIG.embedding.batchSize,
     1,
     256,
-  )
-  const embTimeoutMs = clampInt(
-    readNumber(embedding.timeoutMs) ?? DEFAULT_CONFIG.embedding.timeoutMs,
-    1000,
-    120000,
   )
   const embApiKey = resolveApiKey(embApiKeyRaw)
   const embKey = hashText(
@@ -300,7 +293,6 @@ export async function resolveMemoryConfig(worktree: string): Promise<ResolvedMem
       apiKey: embApiKey,
       headers: embHeaders,
       batchSize: embBatchSize,
-      timeoutMs: embTimeoutMs,
       providerKey: embKey,
     },
     search: {
@@ -396,7 +388,6 @@ export async function searchMemory(params: {
   query: string
   maxResults?: number
   minScore?: number
-  ensureIndex?: boolean
 }) {
   const cfg = params.cfg
   const query = params.query.trim()
@@ -404,11 +395,7 @@ export async function searchMemory(params: {
     return { results: [] as MemorySearchResult[], provider: cfg.embedding.provider, model: cfg.embedding.model }
   }
   const client = createEmbeddingClient(cfg)
-  if (params.ensureIndex !== false) {
-    await syncIndex(cfg, client)
-  } else if (!fsSync.existsSync(cfg.paths.indexFile)) {
-    return { results: [] as MemorySearchResult[], provider: cfg.embedding.provider, model: cfg.embedding.model }
-  }
+  await syncIndex(cfg, client)
   const queryVec = (await embedBatch(client, [query]))[0] ?? []
   const results = await searchIndex(cfg, queryVec, {
     maxResults: params.maxResults,
@@ -429,7 +416,6 @@ function createEmbeddingClient(cfg: ResolvedMemoryConfig): EmbeddingClient {
     apiKey,
     headers: cfg.embedding.headers,
     batchSize: cfg.embedding.batchSize,
-    timeoutMs: cfg.embedding.timeoutMs,
     providerKey: cfg.embedding.providerKey,
   }
 }
@@ -629,15 +615,11 @@ async function embedBatch(client: EmbeddingClient, texts: string[]) {
     Authorization: `Bearer ${client.apiKey}`,
     ...client.headers,
   }
-  const response = await fetchWithTimeout(
-    url,
-    {
-      method: "POST",
-      headers,
-      body: JSON.stringify(body),
-    },
-    client.timeoutMs,
-  )
+  const response = await fetch(url, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(body),
+  })
   if (!response.ok) {
     const message = await response.text()
     throw new Error(`Embedding request failed (${response.status}): ${message}`)
@@ -648,19 +630,6 @@ async function embedBatch(client: EmbeddingClient, texts: string[]) {
   const items = Array.isArray(data.data) ? data.data : []
   const ordered = items.toSorted((a, b) => a.index - b.index)
   return ordered.map((item) => normalizeEmbedding(item.embedding))
-}
-
-async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number) {
-  if (!timeoutMs || timeoutMs <= 0) {
-    return await fetch(url, init)
-  }
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), timeoutMs)
-  try {
-    return await fetch(url, { ...init, signal: controller.signal })
-  } finally {
-    clearTimeout(timer)
-  }
 }
 
 function loadEmbeddingCache(db: Database, client: EmbeddingClient, hashes: string[]) {

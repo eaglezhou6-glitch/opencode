@@ -80,7 +80,6 @@ export const MemoryPlugin: Plugin = async ({ client, worktree }) => {
         query,
         maxResults: cfg.recall.maxResults,
         minScore: cfg.recall.minScore,
-        ensureIndex: false,
       }).catch(() => null)
       const results = searched?.results ?? []
       if (results.length === 0) {
