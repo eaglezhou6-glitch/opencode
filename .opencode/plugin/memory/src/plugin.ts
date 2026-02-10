@@ -131,10 +131,11 @@ export const MemoryPlugin: Plugin = async ({ client, worktree }) => {
         return
       }
       const cfg = await resolveMemoryConfig(worktree)
-      const limit = await resolveModelContextLimit(client, {
-        providerID: info.providerID,
-        modelID: info.modelID,
-      })
+      const sessionModel = await resolveSessionModel(client, input.sessionID, info).catch(() => null)
+      if (!sessionModel) {
+        return
+      }
+      const limit = await resolveModelContextLimit(client, sessionModel)
       if (!limit) {
         return
       }
@@ -520,13 +521,59 @@ async function fetchMessageInfo(
   if (!info) {
     return null
   }
-  return info as {
-    role?: string
-    agent?: string
-    mode?: string
-    providerID?: string
-    modelID?: string
+  const record = info as Record<string, unknown>
+  return {
+    role: readString(record.role),
+    agent: readString(record.agent),
+    mode: readString(record.mode),
+    providerID: readString(record.providerID),
+    modelID: readString(record.modelID),
+    parentID: readString(record.parentID),
+    model: readRecord(record.model) ?? undefined,
   }
+}
+
+async function resolveSessionModel(
+  client: {
+    session: { message: (input: any) => Promise<{ data?: { info?: Record<string, unknown> } }> }
+    config: {
+      get: (input?: any) => Promise<{ data?: Record<string, unknown> }>
+      providers: (input?: any) => Promise<{ data?: { providers?: ProviderEntry[] } }>
+    }
+  },
+  sessionID: string,
+  info: { parentID?: string },
+) {
+  const parentId = info.parentID?.trim()
+  if (parentId) {
+    const parent = await fetchMessageInfo(client, sessionID, parentId).catch(() => null)
+    if (parent?.role === "user") {
+      const model = parent.model
+      const providerID = model ? readString(model.providerID) : undefined
+      const modelID = model ? readString(model.modelID) : undefined
+      if (providerID && modelID) {
+        return { providerID, modelID }
+      }
+    }
+    if (parent?.role === "user" && parent.providerID && parent.modelID) {
+      return { providerID: parent.providerID, modelID: parent.modelID }
+    }
+  }
+  const snapshot = await getConfigSnapshot(client).catch(() => null)
+  if (!snapshot) {
+    return null
+  }
+  const agent = readRecord(snapshot.config.agent)
+  const build = agent ? readRecord(agent.build) : null
+  const buildModel = build ? readString(build.model) : undefined
+  if (buildModel) {
+    return parseModelRef(buildModel)
+  }
+  const defaultModel = readString(snapshot.config.model)
+  if (defaultModel) {
+    return parseModelRef(defaultModel)
+  }
+  return null
 }
 
 async function resolveModelContextLimit(
