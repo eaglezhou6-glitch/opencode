@@ -3,7 +3,7 @@ import { resolveMemoryConfig, searchMemory } from "../lib/memory"
 
 export default tool({
   description:
-    "Search memory files for relevant notes (MEMORY.md + .opencode/memory/*.md).",
+    "Search memory files for relevant notes (MEMORY.md + ~/.config/.opencode/memory/*.md).",
   args: {
     query: tool.schema.string().describe("Search query"),
     maxResults: tool.schema.number().optional().describe("Max results"),

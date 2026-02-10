@@ -147,10 +147,20 @@ export const MemoryPlugin: Plugin = async ({ client, worktree }) => {
       }
 
       if (longTerm.length > 0) {
-        await appendMemory({ cfg, target: "longTerm", items: longTerm }).catch(() => {})
+        await appendMemory({
+          cfg,
+          target: "longTerm",
+          items: longTerm,
+          sessionID: input.sessionID,
+        }).catch(() => {})
       }
       if (daily.length > 0) {
-        await appendMemory({ cfg, target: "daily", items: daily }).catch(() => {})
+        await appendMemory({
+          cfg,
+          target: "daily",
+          items: daily,
+          sessionID: input.sessionID,
+        }).catch(() => {})
       }
 
       log("info", "memory flush wrote notes", {

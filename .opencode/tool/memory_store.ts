@@ -16,6 +16,7 @@ export default tool({
       cfg,
       target: args.target ?? "daily",
       items: [args.text],
+      sessionID: context.sessionID,
     }).catch((err) => ({
       path: "",
       added: [] as string[],

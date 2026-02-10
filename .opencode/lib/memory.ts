@@ -117,7 +117,7 @@ const DEFAULT_FLUSH_USER = [
 
 const DEFAULT_CONFIG = {
   memory: {
-    root: ".opencode",
+    root: "~/.config/.opencode",
     dailyDir: "memory",
     longTermFile: "MEMORY.md",
     indexFile: "",
@@ -328,6 +328,7 @@ export async function appendMemory(params: {
   target: "daily" | "longTerm"
   items: string[]
   now?: Date
+  sessionID?: string
 }) {
   const cfg = params.cfg
   const items = params.items.map((item) => item.trim()).filter(Boolean)
@@ -339,11 +340,12 @@ export async function appendMemory(params: {
   const now = params.now ?? new Date()
   const stamp = `${now.toISOString().replace("T", " ").split(".")[0]} UTC`
   const date = now.toISOString().split("T")[0]
+  const sessionId = sanitizeSessionId(params.sessionID)
   const filePath =
     params.target === "longTerm"
       ? cfg.paths.longTermFile
-      : path.join(cfg.paths.dailyDir, `${date}.md`)
-  const relPath = normalizeRelPath(cfg.worktree, filePath)
+      : path.join(cfg.paths.dailyDir, `${sessionId}-${date}.md`)
+  const relPath = normalizeRelPath(cfg, filePath)
   const existing = await Bun.file(filePath)
     .text()
     .catch(() => "")
@@ -790,7 +792,7 @@ async function listMemoryFiles(cfg: ResolvedMemoryConfig): Promise<MemoryFile[]>
     const content = await Bun.file(absPath).text()
     entries.push({
       absPath,
-      relPath: normalizeRelPath(cfg.worktree, absPath),
+      relPath: normalizeRelPath(cfg, absPath),
       mtimeMs: stat.mtimeMs,
       size: stat.size,
       hash: hashText(content),
@@ -824,30 +826,32 @@ async function resolveAllowedPath(cfg: ResolvedMemoryConfig, rawPath: string) {
   if (!input) {
     return null
   }
-  const absPath = path.isAbsolute(input) ? path.resolve(input) : path.resolve(cfg.worktree, input)
-  if (!absPath.endsWith(".md")) {
-    return null
-  }
-  const stat = await fs.lstat(absPath).catch(() => null)
-  if (!stat || stat.isSymbolicLink() || !stat.isFile()) {
-    return null
-  }
-  if (samePath(absPath, cfg.paths.longTermFile)) {
-    return { absPath, relPath: normalizeRelPath(cfg.worktree, absPath) }
-  }
-  if (absPath.startsWith(`${cfg.paths.dailyDir}${path.sep}`)) {
-    return { absPath, relPath: normalizeRelPath(cfg.worktree, absPath) }
-  }
-  for (const extra of cfg.paths.extraPaths) {
-    const extraStat = await fs.lstat(extra).catch(() => null)
-    if (!extraStat || extraStat.isSymbolicLink()) {
+  const candidates = resolvePathCandidates(cfg, input)
+  for (const absPath of candidates) {
+    if (!absPath.endsWith(".md")) {
       continue
     }
-    if (extraStat.isFile() && samePath(extra, absPath)) {
-      return { absPath, relPath: normalizeRelPath(cfg.worktree, absPath) }
+    const stat = await fs.lstat(absPath).catch(() => null)
+    if (!stat || stat.isSymbolicLink() || !stat.isFile()) {
+      continue
     }
-    if (extraStat.isDirectory() && absPath.startsWith(`${extra}${path.sep}`)) {
-      return { absPath, relPath: normalizeRelPath(cfg.worktree, absPath) }
+    if (samePath(absPath, cfg.paths.longTermFile)) {
+      return { absPath, relPath: normalizeRelPath(cfg, absPath) }
+    }
+    if (absPath.startsWith(`${cfg.paths.dailyDir}${path.sep}`)) {
+      return { absPath, relPath: normalizeRelPath(cfg, absPath) }
+    }
+    for (const extra of cfg.paths.extraPaths) {
+      const extraStat = await fs.lstat(extra).catch(() => null)
+      if (!extraStat || extraStat.isSymbolicLink()) {
+        continue
+      }
+      if (extraStat.isFile() && samePath(extra, absPath)) {
+        return { absPath, relPath: normalizeRelPath(cfg, absPath) }
+      }
+      if (extraStat.isDirectory() && absPath.startsWith(`${extra}${path.sep}`)) {
+        return { absPath, relPath: normalizeRelPath(cfg, absPath) }
+      }
     }
   }
   return null
@@ -992,8 +996,25 @@ function resolvePath(worktree: string, raw: string) {
   return path.normalize(path.join(worktree, raw))
 }
 
-function normalizeRelPath(worktree: string, absPath: string) {
-  return path.relative(worktree, absPath).replace(/\\/g, "/")
+function normalizeRelPath(cfg: ResolvedMemoryConfig, absPath: string) {
+  const resolved = path.resolve(absPath)
+  const root = path.resolve(cfg.paths.rootDir)
+  if (resolved === root || resolved.startsWith(`${root}${path.sep}`)) {
+    return path.relative(root, resolved).replace(/\\/g, "/")
+  }
+  return path.relative(cfg.worktree, resolved).replace(/\\/g, "/")
+}
+
+function resolvePathCandidates(cfg: ResolvedMemoryConfig, input: string) {
+  if (path.isAbsolute(input)) {
+    return [path.resolve(input)]
+  }
+  const root = path.resolve(cfg.paths.rootDir, input)
+  const worktree = path.resolve(cfg.worktree, input)
+  if (samePath(root, worktree)) {
+    return [root]
+  }
+  return [root, worktree]
 }
 
 function samePath(a: string, b: string) {
@@ -1019,6 +1040,15 @@ function stableHeaders(headers: Record<string, string>) {
 
 function hashText(text: string) {
   return crypto.createHash("sha256").update(text).digest("hex")
+}
+
+function sanitizeSessionId(value?: string) {
+  const raw = value?.trim()
+  if (!raw) {
+    return "unknown"
+  }
+  const cleaned = raw.replace(/[^a-zA-Z0-9_-]+/g, "_").replace(/^_+|_+$/g, "")
+  return cleaned ? cleaned.slice(0, 64) : "unknown"
 }
 
 function readString(value: unknown) {

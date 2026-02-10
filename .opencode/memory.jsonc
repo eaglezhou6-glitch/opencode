@@ -1,8 +1,8 @@
 {
   // OpenCode memory plugin config (custom)
   "memory": {
-    // Memory files live under .opencode/
-    "root": ".opencode",
+    // Memory files live under ~/.config/.opencode
+    "root": "~/.config/.opencode",
     "dailyDir": "memory",
     "longTermFile": "MEMORY.md",
     // Optional: custom index location
