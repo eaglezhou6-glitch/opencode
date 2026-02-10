@@ -26,7 +26,6 @@ type ProviderEntry = {
   id: string
   key?: string
   options?: Record<string, unknown>
-  models?: Record<string, { limit?: { context?: number } }>
 }
 
 type FlushOverride = {
@@ -112,42 +111,6 @@ export const MemoryPlugin: Plugin = async ({ client, worktree }) => {
       }
       output.system.push(entry.text)
       RECALL_CACHE.delete(input.sessionID)
-    },
-    "experimental.text.complete": async (input, output) => {
-      if (!input.sessionID) {
-        return
-      }
-      const info = await fetchMessageInfo(client, input.sessionID, input.messageID).catch(() => null)
-      if (!info) {
-        return
-      }
-      if (info.role !== "assistant") {
-        return
-      }
-      if (info.agent !== "compaction" && info.mode !== "compaction") {
-        return
-      }
-      if (!info.providerID || !info.modelID) {
-        return
-      }
-      const cfg = await resolveMemoryConfig(worktree)
-      const sessionModel = await resolveSessionModel(client, input.sessionID, info).catch(() => null)
-      if (!sessionModel) {
-        return
-      }
-      const limit = await resolveModelContextLimit(client, sessionModel)
-      if (!limit) {
-        return
-      }
-      const estimate = estimateTokens(output.text)
-      if (estimate <= limit) {
-        return
-      }
-      const notice = "\n\n【已截断】压缩结果超过上下文长度，关键信息已在记忆中保存。"
-      const maxChars = Math.max(200, Math.floor(limit * 4))
-      const reserved = Math.min(maxChars, notice.length)
-      const bodyLimit = Math.max(0, maxChars - reserved)
-      output.text = `${output.text.slice(0, bodyLimit).trimEnd()}${notice}`
     },
     "experimental.session.compacting": async (input) => {
       const cfg = await resolveMemoryConfig(worktree)
@@ -506,97 +469,6 @@ function parseModelRef(model: string): ModelRef | null {
   return { providerID, modelID }
 }
 
-async function fetchMessageInfo(
-  client: {
-    session: { message: (input: any) => Promise<{ data?: { info?: Record<string, unknown> } }> }
-  },
-  sessionID: string,
-  messageID: string,
-) {
-  const res = await client.session.message({
-    path: { id: sessionID, messageID },
-    responseStyle: "data",
-  })
-  const info = (res as { data?: { info?: Record<string, unknown> } }).data?.info
-  if (!info) {
-    return null
-  }
-  const record = info as Record<string, unknown>
-  return {
-    role: readString(record.role),
-    agent: readString(record.agent),
-    mode: readString(record.mode),
-    providerID: readString(record.providerID),
-    modelID: readString(record.modelID),
-    parentID: readString(record.parentID),
-    model: readRecord(record.model) ?? undefined,
-  }
-}
-
-async function resolveSessionModel(
-  client: {
-    session: { message: (input: any) => Promise<{ data?: { info?: Record<string, unknown> } }> }
-    config: {
-      get: (input?: any) => Promise<{ data?: Record<string, unknown> }>
-      providers: (input?: any) => Promise<{ data?: { providers?: ProviderEntry[] } }>
-    }
-  },
-  sessionID: string,
-  info: { parentID?: string },
-) {
-  const parentId = info.parentID?.trim()
-  if (parentId) {
-    const parent = await fetchMessageInfo(client, sessionID, parentId).catch(() => null)
-    if (parent?.role === "user") {
-      const model = parent.model
-      const providerID = model ? readString(model.providerID) : undefined
-      const modelID = model ? readString(model.modelID) : undefined
-      if (providerID && modelID) {
-        return { providerID, modelID }
-      }
-    }
-    if (parent?.role === "user" && parent.providerID && parent.modelID) {
-      return { providerID: parent.providerID, modelID: parent.modelID }
-    }
-  }
-  const snapshot = await getConfigSnapshot(client).catch(() => null)
-  if (!snapshot) {
-    return null
-  }
-  const agent = readRecord(snapshot.config.agent)
-  const build = agent ? readRecord(agent.build) : null
-  const buildModel = build ? readString(build.model) : undefined
-  if (buildModel) {
-    return parseModelRef(buildModel)
-  }
-  const defaultModel = readString(snapshot.config.model)
-  if (defaultModel) {
-    return parseModelRef(defaultModel)
-  }
-  return null
-}
-
-async function resolveModelContextLimit(
-  client: {
-    config: {
-      get: (input?: any) => Promise<{ data?: Record<string, unknown> }>
-      providers: (input?: any) => Promise<{ data?: { providers?: ProviderEntry[] } }>
-    }
-  },
-  ref: ModelRef,
-) {
-  const snapshot = await getConfigSnapshot(client).catch(() => null)
-  if (!snapshot) {
-    return null
-  }
-  const provider = snapshot.providers.find((entry) => entry.id === ref.providerID)
-  const model = provider?.models?.[ref.modelID]
-  const limit = model?.limit?.context
-  if (typeof limit === "number" && limit > 0) {
-    return limit
-  }
-  return null
-}
 
 function parseNotes(text: string): MemoryNotes | null {
   if (text.includes("NO_MEMORY")) {
@@ -696,9 +568,3 @@ function uniqueNotes(items: string[], limit: number) {
   return out
 }
 
-function estimateTokens(text: string) {
-  if (!text) {
-    return 0
-  }
-  return Math.ceil(text.length / 4)
-}

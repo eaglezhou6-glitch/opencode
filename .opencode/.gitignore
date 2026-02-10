@@ -6,3 +6,6 @@ memory/
 !plugin/
 !plugin/memory/
 !plugin/memory/**
+!plugin/compaction-limit/
+!plugin/compaction-limit/**
+!plugin/compaction-limit/package.json
