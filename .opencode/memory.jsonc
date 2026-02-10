@@ -19,7 +19,8 @@
     "baseUrl": "https://api.openai.com/v1",
     "apiKey": "env:OPENAI_API_KEY",
     "headers": {},
-    "batchSize": 64
+    "batchSize": 64,
+    "timeoutMs": 15000
   },
   "search": {
     "maxResults": 6,
