@@ -1,4 +1,5 @@
 import type { Plugin } from "@opencode-ai/plugin"
+import { generateText } from "ai"
 import { appendMemory, resolveMemoryConfig, searchMemory } from "./memory"
 
 type MessageEntry = {
@@ -24,6 +25,7 @@ type ModelRef = {
 
 type ModelEntry = {
   api?: {
+    id?: string
     url?: string
     npm?: string
   }
@@ -44,11 +46,15 @@ type ConfigSnapshot = {
 }
 
 type FlushTarget = {
-  model: string
-  baseUrl: string
-  apiKey: string
-  headers: Record<string, string>
+  provider: ProviderEntry
+  model: ModelEntry
+  modelID: string
+  apiID: string
+  npm: string
+  options: Record<string, unknown>
 }
+
+type LanguageModel = Parameters<typeof generateText>[0]["model"]
 
 const RECALL_TTL_MS = 5 * 60 * 1000
 const RECALL_CACHE = new Map<string, RecallEntry>()
@@ -328,21 +334,60 @@ async function extractWithLlm(
   log: (level: "debug" | "info" | "warn" | "error", message: string, extra?: object) => void,
 ) {
   const target = await resolveFlushTarget(client, cfg, log)
-  if (!target) {
+  if (target) {
+    const notes = await extractWithSdk(target, cfg, transcript).catch(() => null)
+    if (notes) {
+      return notes
+    }
+  }
+  return extractWithFetch(cfg, transcript)
+}
+
+async function extractWithSdk(
+  target: FlushTarget,
+  cfg: Awaited<ReturnType<typeof resolveMemoryConfig>>,
+  transcript: string,
+) {
+  const language = await resolveLanguage(target).catch(() => null)
+  if (!language) {
     return null
   }
-  const baseUrl = target.baseUrl.replace(/\/+$/, "")
+  const result = await generateText({
+    model: language,
+    temperature: 0.2,
+    messages: [
+      { role: "system", content: cfg.flush.systemPrompt },
+      { role: "user", content: `${cfg.flush.userPrompt}\n\n${transcript}` },
+    ],
+  })
+  const content = result.text
+  if (typeof content !== "string") {
+    return null
+  }
+  return parseNotes(content)
+}
+
+async function extractWithFetch(cfg: Awaited<ReturnType<typeof resolveMemoryConfig>>, transcript: string) {
+  const model = readString(cfg.flush.model)
+  if (!model) {
+    return null
+  }
+  const apiKey = cfg.flush.apiKey
+  if (!apiKey) {
+    return null
+  }
+  const baseUrl = cfg.flush.baseUrl.replace(/\/+$/, "")
   if (!baseUrl) {
     return null
   }
   const url = `${baseUrl}/chat/completions`
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
-    Authorization: `Bearer ${target.apiKey}`,
-    ...target.headers,
+    Authorization: `Bearer ${apiKey}`,
+    ...cfg.flush.headers,
   }
   const body = {
-    model: target.model,
+    model,
     temperature: 0.2,
     messages: [
       { role: "system", content: cfg.flush.systemPrompt },
@@ -364,8 +409,7 @@ async function extractWithLlm(
   if (typeof content !== "string") {
     return null
   }
-  const notes = parseNotes(content)
-  return notes
+  return parseNotes(content)
 }
 
 async function resolveFlushTarget(
@@ -382,29 +426,90 @@ async function resolveFlushTarget(
   const match = pickCandidate(snapshot.providers, candidates)
   if (!match) {
     log("warn", "memory flush model not found in providers", { candidates })
-    return fallbackTarget(cfg)
+    return null
   }
   const provider = match.provider
   const model = match.model
+  const api = readRecord(model.api)
+  const apiID = readString(api?.id) ?? match.ref.modelID
+  const npm = readString(api?.npm)
+  if (!npm) {
+    log("warn", "memory flush npm missing", { provider: provider.id, model: match.ref.modelID })
+    return null
+  }
+  const options = buildProviderOptions(provider, model, cfg)
+  return {
+    provider,
+    model,
+    modelID: match.ref.modelID,
+    apiID,
+    npm,
+    options,
+  }
+}
+
+function buildProviderOptions(
+  provider: ProviderEntry,
+  model: ModelEntry,
+  cfg: Awaited<ReturnType<typeof resolveMemoryConfig>>,
+) {
+  const base = readRecord(provider.options) ?? {}
+  const extra = readRecord(model.options) ?? {}
+  const out: Record<string, unknown> = { ...base, ...extra }
+  if (out.name === undefined) {
+    out.name = provider.id
+  }
   const baseUrl = resolveBaseUrl(provider, model, cfg)
-  if (!baseUrl) {
-    log("warn", "memory flush baseUrl missing", { provider: provider.id })
-    return fallbackTarget(cfg)
+  if (baseUrl && out.baseURL === undefined) {
+    out.baseURL = baseUrl
   }
   const apiKey = readString(provider.key) ?? readString(provider.options?.apiKey) ?? cfg.flush.apiKey
-  if (!apiKey) {
-    log("warn", "memory flush apiKey missing", { provider: provider.id })
-    return fallbackTarget(cfg)
+  if (apiKey && out.apiKey === undefined) {
+    out.apiKey = apiKey
   }
   const baseHeaders = readStringMap(provider.options?.headers) ?? {}
   const modelHeaders = readStringMap(model.headers) ?? {}
   const headers = { ...baseHeaders, ...modelHeaders, ...cfg.flush.headers }
-  return {
-    model: match.ref.modelID,
-    baseUrl,
-    apiKey,
-    headers,
+  if (Object.keys(headers).length > 0) {
+    out.headers = headers
   }
+  return out
+}
+
+async function resolveLanguage(target: FlushTarget): Promise<LanguageModel | null> {
+  const mod = await import(target.npm).catch(() => null)
+  const record = readRecord(mod)
+  if (!record) {
+    return null
+  }
+  const key = Object.keys(record).find((item) => item.startsWith("create"))
+  if (!key) {
+    return null
+  }
+  const fn = record[key]
+  if (!isFunction(fn)) {
+    return null
+  }
+  const opt = { ...target.options }
+  if (opt.name === undefined) {
+    opt.name = target.provider.id
+  }
+  const sdk = fn(opt)
+  const sdkRecord = readRecord(sdk)
+  if (!sdkRecord) {
+    return null
+  }
+  const modelFn = sdkRecord.languageModel
+  if (!isFunction(modelFn)) {
+    return null
+  }
+  const language = await Promise.resolve()
+    .then(() => modelFn(target.apiID))
+    .catch(() => null)
+  if (!language) {
+    return null
+  }
+  return language as LanguageModel
 }
 
 function buildCandidates(
@@ -471,22 +576,6 @@ function resolveBaseUrl(
     return "https://api.openai.com/v1"
   }
   return cfg.flush.baseUrl
-}
-
-function fallbackTarget(cfg: Awaited<ReturnType<typeof resolveMemoryConfig>>): FlushTarget | null {
-  const model = readString(cfg.flush.model)
-  if (!model) {
-    return null
-  }
-  const baseUrl = readString(cfg.flush.baseUrl)
-  if (!baseUrl) {
-    return null
-  }
-  const apiKey = cfg.flush.apiKey
-  if (!apiKey) {
-    return null
-  }
-  return { model, baseUrl, apiKey, headers: cfg.flush.headers ?? {} }
 }
 
 async function getConfigSnapshot(client: Parameters<Plugin>[0]["client"]) {
@@ -590,6 +679,10 @@ function readString(value: unknown) {
   }
   const trimmed = value.trim()
   return trimmed ? trimmed : undefined
+}
+
+function isFunction(value: unknown): value is (...args: unknown[]) => unknown {
+  return typeof value === "function"
 }
 
 function readStringMap(value: unknown) {
