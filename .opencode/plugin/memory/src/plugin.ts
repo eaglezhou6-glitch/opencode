@@ -22,11 +22,20 @@ type ModelRef = {
   modelID: string
 }
 
+type ModelEntry = {
+  api?: {
+    url?: string
+    npm?: string
+  }
+  headers?: Record<string, string>
+  options?: Record<string, unknown>
+}
+
 type ProviderEntry = {
   id: string
   key?: string
   options?: Record<string, unknown>
-  models?: Record<string, unknown>
+  models?: Record<string, ModelEntry>
 }
 
 type ConfigSnapshot = {
@@ -376,18 +385,20 @@ async function resolveFlushTarget(
     return fallbackTarget(cfg)
   }
   const provider = match.provider
-  const baseUrl = resolveBaseUrl(provider, cfg)
+  const model = match.model
+  const baseUrl = resolveBaseUrl(provider, model, cfg)
   if (!baseUrl) {
     log("warn", "memory flush baseUrl missing", { provider: provider.id })
     return fallbackTarget(cfg)
   }
-  const apiKey = readString(provider.key) ?? cfg.flush.apiKey
+  const apiKey = readString(provider.key) ?? readString(provider.options?.apiKey) ?? cfg.flush.apiKey
   if (!apiKey) {
     log("warn", "memory flush apiKey missing", { provider: provider.id })
     return fallbackTarget(cfg)
   }
   const baseHeaders = readStringMap(provider.options?.headers) ?? {}
-  const headers = { ...baseHeaders, ...cfg.flush.headers }
+  const modelHeaders = readStringMap(model.headers) ?? {}
+  const headers = { ...baseHeaders, ...modelHeaders, ...cfg.flush.headers }
   return {
     model: match.ref.modelID,
     baseUrl,
@@ -427,25 +438,34 @@ function buildCandidates(
 
 function pickCandidate(providers: ProviderEntry[], refs: ModelRef[]) {
   const match = refs
-    .map((ref) => ({ ref, provider: providers.find((item) => item.id === ref.providerID) }))
-    .find((entry) => entry.provider && hasModel(entry.provider, entry.ref.modelID))
-  if (!match || !match.provider) {
+    .map((ref) => {
+      const provider = providers.find((item) => item.id === ref.providerID)
+      const model = provider?.models?.[ref.modelID]
+      if (!provider || !model) {
+        return null
+      }
+      return { ref, provider, model }
+    })
+    .find((entry) => entry)
+  if (!match) {
     return null
   }
   return match
 }
 
-function hasModel(provider: ProviderEntry, modelID: string) {
-  if (!provider.models) {
-    return false
-  }
-  return Boolean(provider.models[modelID])
-}
-
-function resolveBaseUrl(provider: ProviderEntry, cfg: Awaited<ReturnType<typeof resolveMemoryConfig>>) {
+function resolveBaseUrl(
+  provider: ProviderEntry,
+  model: ModelEntry,
+  cfg: Awaited<ReturnType<typeof resolveMemoryConfig>>,
+) {
   const baseUrl = readString(provider.options?.baseURL) ?? readString(provider.options?.baseUrl)
   if (baseUrl) {
     return baseUrl
+  }
+  const api = readRecord(model.api)
+  const apiUrl = readString(api?.url)
+  if (apiUrl) {
+    return apiUrl
   }
   if (provider.id === "openai") {
     return "https://api.openai.com/v1"
