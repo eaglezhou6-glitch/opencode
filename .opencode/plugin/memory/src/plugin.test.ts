@@ -601,7 +601,7 @@ describe("event — session.created flush", () => {
     console.log("  no flush when no previous session")
   })
 
-  test("skips already-flushed sessions (dedup with compaction)", async () => {
+  test("skips flush when messages unchanged since last flush", async () => {
     const { hooks, logs } = await initPlugin()
 
     // Simulate chat.message to track session
@@ -613,20 +613,20 @@ describe("event — session.created flush", () => {
       } as any,
     )
 
-    // Trigger compaction flush first — marks session as flushed
+    // Trigger compaction flush — records tail message ID
     await hooks["experimental.session.compacting"]!(
       { sessionID: "dup-session" },
       { context: [], prompt: undefined },
     )
     const flushCount = logs.filter((l) => l.message === "memory flush wrote notes").length
 
-    // Now fire session.created — should NOT flush again
+    // session.created with same messages — tail unchanged, should skip
     await hooks.event!(
       { event: { type: "session.created", properties: { info: { id: "next-session" } } } } as any,
     )
     const afterCount = logs.filter((l) => l.message === "memory flush wrote notes").length
     expect(afterCount).toBe(flushCount)
-    console.log("  dedup: compacted session not flushed again")
+    console.log("  dedup: unchanged messages not flushed again")
   })
 
   test("ignores non session.created events", async () => {

@@ -1,3 +1,5 @@
+process.env.TZ = "Asia/Shanghai"
+
 import type { Plugin } from "@opencode-ai/plugin"
 import { generateText } from "ai"
 import { createCompaction, createCompactionState, type CompactionCtx } from "./compaction"
@@ -68,7 +70,7 @@ export const MemoryPlugin: Plugin = async ({ client, worktree }) => {
   const compaction = createCompaction({ client } as unknown as CompactionCtx, compactionState)
 
   let activeSessionID: string | undefined
-  const flushedSessions = new Set<string>()
+  const lastFlushTail = new Map<string, string>()
 
   const log = (level: "debug" | "info" | "warn" | "error", message: string, extra?: object) => {
     void client.app
@@ -83,8 +85,14 @@ export const MemoryPlugin: Plugin = async ({ client, worktree }) => {
       .catch(() => {})
   }
 
+  const tail = (messages: MessageEntry[]) => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const id = (messages[i] as { info?: { id?: string } }).info?.id
+      if (id) return id
+    }
+  }
+
   const flushSession = async (sessionID: string, messages?: MessageEntry[]) => {
-    if (flushedSessions.has(sessionID)) return
     const cfg = await resolveMemoryConfig(worktree)
     if (!cfg.flush.enabled) return
     if (!messages) {
@@ -92,6 +100,8 @@ export const MemoryPlugin: Plugin = async ({ client, worktree }) => {
       messages = Array.isArray(res.data) ? (res.data as MessageEntry[]) : []
     }
     if (messages.length === 0) return
+    const id = tail(messages)
+    if (id && lastFlushTail.get(sessionID) === id) return
     const transcript = buildTranscript(messages, cfg.flush.maxMessages)
     if (!transcript) return
     const notes = await resolveNotes(client, cfg, transcript, log)
@@ -108,7 +118,7 @@ export const MemoryPlugin: Plugin = async ({ client, worktree }) => {
       log("info", "memory flush wrote notes", { sessionID, longTerm: longTerm.length, daily: daily.length })
       await syncMemoryIndex(cfg)
     }
-    flushedSessions.add(sessionID)
+    if (id) lastFlushTail.set(sessionID, id)
   }
 
   return {
@@ -117,7 +127,7 @@ export const MemoryPlugin: Plugin = async ({ client, worktree }) => {
       const info = (event.properties?.info ?? {}) as { id?: string }
       const prev = activeSessionID
       activeSessionID = info.id
-      if (!prev || flushedSessions.has(prev)) return
+      if (!prev) return
       await flushSession(prev).catch(() => {})
     },
     "chat.message": async (input, output) => {
