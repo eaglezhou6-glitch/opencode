@@ -1,5 +1,5 @@
 import type { Plugin } from "@opencode-ai/plugin"
-import { appendMemory, appendSessionSummary, resolveMemoryConfig, searchMemory } from "./memory"
+import { appendMemory, resolveMemoryConfig, searchMemory } from "./memory"
 
 type MessageEntry = {
   info?: { role?: string }
@@ -142,16 +142,7 @@ export const MemoryPlugin: Plugin = async ({ client, worktree }) => {
       if (estimate <= limit) {
         return
       }
-      const now = new Date()
-      const date = now.toISOString().split("T")[0]
-      await appendSessionSummary({
-        cfg,
-        sessionID: input.sessionID,
-        messageID: input.messageID,
-        text: output.text,
-        now,
-      }).catch(() => {})
-      const notice = `\n\n【已截断】压缩结果超过上下文长度，完整内容请查看 session-${date}.md。`
+      const notice = "\n\n【已截断】压缩结果超过上下文长度，关键信息已在记忆中保存。"
       const maxChars = Math.max(200, Math.floor(limit * 4))
       const reserved = Math.min(maxChars, notice.length)
       const bodyLimit = Math.max(0, maxChars - reserved)
