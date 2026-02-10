@@ -1,5 +1,5 @@
 import { tool } from "@opencode-ai/plugin"
-import { appendMemory, resolveMemoryConfig } from "../lib/memory"
+import { appendMemory, resolveMemoryConfig } from "../plugin/memory/src/memory"
 
 export default tool({
   description: "Store a memory note in long-term or daily memory.",

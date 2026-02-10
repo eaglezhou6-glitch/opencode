@@ -1,5 +1,5 @@
 import { tool } from "@opencode-ai/plugin"
-import { resolveMemoryConfig, searchMemory } from "../lib/memory"
+import { resolveMemoryConfig, searchMemory } from "../plugin/memory/src/memory"
 
 export default tool({
   description:

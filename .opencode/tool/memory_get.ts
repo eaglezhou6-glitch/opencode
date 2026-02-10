@@ -1,5 +1,5 @@
 import { tool } from "@opencode-ai/plugin"
-import { readMemoryFile, resolveMemoryConfig } from "../lib/memory"
+import { readMemoryFile, resolveMemoryConfig } from "../plugin/memory/src/memory"
 
 export default tool({
   description: "Read a memory file by path with optional line ranges.",

@@ -3,3 +3,6 @@ bun.lock
 package.json
 MEMORY.md
 memory/
+!plugin/
+!plugin/memory/
+!plugin/memory/**
