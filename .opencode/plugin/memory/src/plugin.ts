@@ -1,6 +1,7 @@
 import type { Plugin } from "@opencode-ai/plugin"
 import { generateText } from "ai"
-import { appendMemory, resolveMemoryConfig, searchMemory } from "./memory"
+import { createCompaction, createCompactionState, type CompactionCtx } from "./compaction"
+import { appendMemory, resolveMemoryConfig, searchMemory, syncMemoryIndex } from "./memory"
 
 type MessageEntry = {
   info?: { role?: string }
@@ -54,7 +55,7 @@ type FlushTarget = {
   options: Record<string, unknown>
 }
 
-type LanguageModel = Parameters<typeof generateText>[0]["model"]
+type LanguageModel = any
 
 const RECALL_TTL_MS = 5 * 60 * 1000
 const RECALL_CACHE = new Map<string, RecallEntry>()
@@ -63,6 +64,12 @@ const CONFIG_TTL_MS = 60 * 1000
 let CONFIG_CACHE: { at: number; snapshot: ConfigSnapshot } | null = null
 
 export const MemoryPlugin: Plugin = async ({ client, worktree }) => {
+  const compactionState = createCompactionState()
+  const compaction = createCompaction({ client } as unknown as CompactionCtx, compactionState)
+
+  let activeSessionID: string | undefined
+  const flushedSessions = new Set<string>()
+
   const log = (level: "debug" | "info" | "warn" | "error", message: string, extra?: object) => {
     void client.app
       .log({
@@ -70,14 +77,52 @@ export const MemoryPlugin: Plugin = async ({ client, worktree }) => {
           service: "memory",
           level,
           message,
-          extra,
+          extra: extra as unknown as Record<string, unknown> | undefined,
         },
       })
       .catch(() => {})
   }
 
+  const flushSession = async (sessionID: string, messages?: MessageEntry[]) => {
+    if (flushedSessions.has(sessionID)) return
+    const cfg = await resolveMemoryConfig(worktree)
+    if (!cfg.flush.enabled) return
+    if (!messages) {
+      const res = await client.session.messages({ path: { id: sessionID } })
+      messages = Array.isArray(res.data) ? (res.data as MessageEntry[]) : []
+    }
+    if (messages.length === 0) return
+    const transcript = buildTranscript(messages, cfg.flush.maxMessages)
+    if (!transcript) return
+    const notes = await resolveNotes(client, cfg, transcript, log)
+    if (!notes) return
+    const longTerm = uniqueNotes(notes.longTerm, cfg.flush.maxItems)
+    const daily = uniqueNotes(notes.daily, cfg.flush.maxItems)
+    if (longTerm.length > 0) {
+      await appendMemory({ cfg, target: "longTerm", items: longTerm, sessionID }).catch(() => {})
+    }
+    if (daily.length > 0) {
+      await appendMemory({ cfg, target: "daily", items: daily, sessionID }).catch(() => {})
+    }
+    if (longTerm.length > 0 || daily.length > 0) {
+      log("info", "memory flush wrote notes", { sessionID, longTerm: longTerm.length, daily: daily.length })
+      await syncMemoryIndex(cfg)
+    }
+    flushedSessions.add(sessionID)
+  }
+
   return {
+    event: async ({ event }: { event: { type: string; properties?: Record<string, unknown> } }) => {
+      if (event.type !== "session.created") return
+      const info = (event.properties?.info ?? {}) as { id?: string }
+      const prev = activeSessionID
+      activeSessionID = info.id
+      if (!prev || flushedSessions.has(prev)) return
+      await flushSession(prev).catch(() => {})
+    },
     "chat.message": async (input, output) => {
+      if (!activeSessionID) activeSessionID = input.sessionID
+
       const msg = output.message
       if (msg.role !== "user") {
         return
@@ -133,59 +178,24 @@ export const MemoryPlugin: Plugin = async ({ client, worktree }) => {
       output.system.push(entry.text)
       RECALL_CACHE.delete(input.sessionID)
     },
-    "experimental.session.compacting": async (input) => {
-      const cfg = await resolveMemoryConfig(worktree)
-      if (!cfg.flush.enabled) {
-        return
-      }
-
+    "experimental.session.compacting": async (input, output) => {
+      // Fetch all messages once — shared by flush and compaction
       const res = await client.session.messages({
         path: { id: input.sessionID },
-        query: { limit: cfg.flush.maxMessages },
       })
-      const data = Array.isArray(res.data) ? (res.data as MessageEntry[]) : []
-      if (data.length === 0) {
-        return
-      }
+      const allMessages = Array.isArray(res.data) ? (res.data as MessageEntry[]) : []
 
-      const transcript = buildTranscript(data, cfg.flush.maxMessages)
-      if (!transcript) {
-        return
-      }
+      // Memory flush (reuses allMessages, deduplicates via flushedSessions)
+      await flushSession(input.sessionID, allMessages)
 
-      const notes = await resolveNotes(client, cfg, transcript, log)
-      if (!notes) {
-        return
-      }
-
-      const longTerm = uniqueNotes(notes.longTerm, cfg.flush.maxItems)
-      const daily = uniqueNotes(notes.daily, cfg.flush.maxItems)
-      if (longTerm.length === 0 && daily.length === 0) {
-        return
-      }
-
-      if (longTerm.length > 0) {
-        await appendMemory({
-          cfg,
-          target: "longTerm",
-          items: longTerm,
-          sessionID: input.sessionID,
-        }).catch(() => {})
-      }
-      if (daily.length > 0) {
-        await appendMemory({
-          cfg,
-          target: "daily",
-          items: daily,
-          sessionID: input.sessionID,
-        }).catch(() => {})
-      }
-
-      log("info", "memory flush wrote notes", {
-        sessionID: input.sessionID,
-        longTerm: longTerm.length,
-        daily: daily.length,
-      })
+      // Compaction: token limit note (reuses allMessages)
+      await compaction.onCompacting(input, output, allMessages)
+    },
+    "experimental.text.complete": async (input, output) => {
+      await compaction.onTextComplete(input, output)
+    },
+    "tool.execute.after": async (input, output) => {
+      await compaction.onToolAfter(input, output)
     },
   }
 }
@@ -587,9 +597,8 @@ async function getConfigSnapshot(client: Parameters<Plugin>[0]["client"]) {
     client.provider.list({ responseStyle: "data" }).catch(() => null),
   ])
   const config = readRecord(configRes) ?? {}
-  const providers = Array.isArray(providerRes?.all)
-    ? (providerRes?.all as ProviderEntry[])
-    : []
+  const all = providerRes && typeof providerRes === "object" && "all" in providerRes ? (providerRes as { all: ProviderEntry[] }).all : undefined
+  const providers = Array.isArray(all) ? all : []
   const snapshot = {
     model: readString(config.model),
     providers,

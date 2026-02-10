@@ -382,6 +382,13 @@ export async function readMemoryFile(params: {
   return { path: resolved.relPath, text: slice.join("\n") }
 }
 
+export async function syncMemoryIndex(cfg: ResolvedMemoryConfig) {
+  try {
+    const client = createEmbeddingClient(cfg)
+    await syncIndex(cfg, client)
+  } catch {}
+}
+
 export async function searchMemory(params: {
   cfg: ResolvedMemoryConfig
   query: string

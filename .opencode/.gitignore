@@ -1,11 +1,9 @@
 plans/
 bun.lock
-package.json
+node_modules/
 MEMORY.md
 memory/
+!package.json
 !plugin/
 !plugin/memory/
 !plugin/memory/**
-!plugin/compaction-limit/
-!plugin/compaction-limit/**
-!plugin/compaction-limit/package.json
