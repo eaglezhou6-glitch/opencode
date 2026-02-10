@@ -36,6 +36,7 @@
   "flush": {
     "enabled": true,
     "mode": "llm",
+    "useCompactionModel": true,
     "model": "gpt-4o-mini",
     "baseUrl": "",
     "apiKey": "",

@@ -17,8 +17,29 @@ type RecallEntry = {
   createdAt: number
 }
 
+type ModelRef = {
+  providerID: string
+  modelID: string
+}
+
+type ProviderEntry = {
+  id: string
+  key?: string
+  options?: Record<string, unknown>
+}
+
+type FlushOverride = {
+  model: string
+  baseUrl: string
+  apiKey?: string
+  headers?: Record<string, string>
+}
+
 const RECALL_TTL_MS = 5 * 60 * 1000
 const RECALL_CACHE = new Map<string, RecallEntry>()
+const CONFIG_TTL_MS = 60 * 1000
+let CONFIG_CACHE: { at: number; config: Record<string, unknown>; providers: ProviderEntry[] } | null =
+  null
 
 export const MemoryPlugin: Plugin = async ({ client, worktree }) => {
   const log = (level: "debug" | "info" | "warn" | "error", message: string, extra?: object) => {
@@ -111,7 +132,10 @@ export const MemoryPlugin: Plugin = async ({ client, worktree }) => {
         return
       }
 
-      const notes = await resolveNotes(cfg, transcript, log)
+      const override = cfg.flush.useCompactionModel
+        ? await resolveFlushOverride(client, data, log)
+        : null
+      const notes = await resolveNotes(cfg, transcript, log, override)
       if (!notes) {
         return
       }
@@ -225,11 +249,16 @@ async function resolveNotes(
   cfg: Awaited<ReturnType<typeof resolveMemoryConfig>>,
   transcript: string,
   log: (level: "debug" | "info" | "warn" | "error", message: string, extra?: object) => void,
+  override?: FlushOverride | null,
 ) {
   if (cfg.flush.mode === "heuristic") {
     return extractHeuristic(transcript)
   }
-  const llm = await extractWithLlm(cfg, transcript).catch(() => null)
+  if (cfg.flush.useCompactionModel && !override) {
+    log("warn", "memory flush compaction model unavailable, falling back to heuristics")
+    return extractHeuristic(transcript)
+  }
+  const llm = await extractWithLlm(cfg, transcript, override ?? undefined).catch(() => null)
   if (llm) {
     return llm
   }
@@ -274,19 +303,28 @@ function formatRecall(
   return lines.join("\n")
 }
 
-async function extractWithLlm(cfg: Awaited<ReturnType<typeof resolveMemoryConfig>>, transcript: string) {
-  const apiKey = cfg.flush.apiKey
+async function extractWithLlm(
+  cfg: Awaited<ReturnType<typeof resolveMemoryConfig>>,
+  transcript: string,
+  override?: FlushOverride,
+) {
+  const apiKey = override?.apiKey ?? cfg.flush.apiKey
   if (!apiKey) {
     return null
   }
-  const url = `${cfg.flush.baseUrl.replace(/\/+$/, "")}/chat/completions`
+  const baseUrl = (override?.baseUrl ?? cfg.flush.baseUrl).replace(/\/+$/, "")
+  if (!baseUrl) {
+    return null
+  }
+  const url = `${baseUrl}/chat/completions`
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     Authorization: `Bearer ${apiKey}`,
     ...cfg.flush.headers,
+    ...(override?.headers ?? {}),
   }
   const body = {
-    model: cfg.flush.model,
+    model: override?.model ?? cfg.flush.model,
     temperature: 0.2,
     messages: [
       { role: "system", content: cfg.flush.systemPrompt },
@@ -310,6 +348,115 @@ async function extractWithLlm(cfg: Awaited<ReturnType<typeof resolveMemoryConfig
   }
   const notes = parseNotes(content)
   return notes
+}
+
+async function resolveFlushOverride(
+  client: {
+    config: {
+      get: (input?: any) => Promise<{ data?: Record<string, unknown> }>
+      providers: (input?: any) => Promise<{ data?: { providers?: ProviderEntry[] } }>
+    }
+  },
+  entries: MessageEntry[],
+  log: (level: "debug" | "info" | "warn" | "error", message: string, extra?: object) => void,
+) {
+  const snapshot = await getConfigSnapshot(client).catch(() => null)
+  if (!snapshot) {
+    return null
+  }
+  const compactionModel = resolveCompactionModel(snapshot.config, entries)
+  if (!compactionModel) {
+    return null
+  }
+  const provider = snapshot.providers.find((entry) => entry.id === compactionModel.providerID)
+  const baseUrl =
+    readString(provider?.options?.baseURL) ??
+    readString(provider?.options?.baseUrl) ??
+    (compactionModel.providerID === "openai" ? "https://api.openai.com/v1" : "")
+  const apiKey = provider?.key
+  if (!baseUrl || !apiKey) {
+    log("warn", "memory flush compaction model not usable, missing baseUrl/apiKey", {
+      providerID: compactionModel.providerID,
+    })
+    return null
+  }
+  const headers = readStringMap(provider?.options?.headers) ?? {}
+  return {
+    model: compactionModel.modelID,
+    baseUrl,
+    apiKey,
+    headers,
+  }
+}
+
+async function getConfigSnapshot(client: {
+  config: {
+    get: (input?: any) => Promise<{ data?: Record<string, unknown> }>
+    providers: (input?: any) => Promise<{ data?: { providers?: ProviderEntry[] } }>
+  }
+}) {
+  if (CONFIG_CACHE && Date.now() - CONFIG_CACHE.at < CONFIG_TTL_MS) {
+    return CONFIG_CACHE
+  }
+  const [configRes, providersRes] = await Promise.all([
+    client.config.get({ responseStyle: "data" }),
+    client.config.providers({ responseStyle: "data" }),
+  ])
+  const config = (configRes as { data?: Record<string, unknown> }).data ?? {}
+  const providers = (providersRes as { data?: { providers?: ProviderEntry[] } }).data?.providers ?? []
+  CONFIG_CACHE = { at: Date.now(), config, providers }
+  return CONFIG_CACHE
+}
+
+function resolveCompactionModel(config: Record<string, unknown>, entries: MessageEntry[]): ModelRef | null {
+  const agent = readRecord(config.agent)
+  const compaction = agent ? readRecord(agent.compaction) : null
+  const compactionModel = compaction ? readString(compaction.model) : undefined
+  if (compactionModel) {
+    return parseModelRef(compactionModel)
+  }
+  const userModel = lastUserModel(entries)
+  if (userModel) {
+    return userModel
+  }
+  const defaultModel = readString(config.model)
+  if (defaultModel) {
+    return parseModelRef(defaultModel)
+  }
+  return null
+}
+
+function lastUserModel(entries: MessageEntry[]): ModelRef | null {
+  for (let i = entries.length - 1; i >= 0; i -= 1) {
+    const info = entries[i]?.info as Record<string, unknown> | undefined
+    if (!info || info.role !== "user") {
+      continue
+    }
+    const model = readRecord(info.model)
+    const providerID = model ? readString(model.providerID) : undefined
+    const modelID = model ? readString(model.modelID) : undefined
+    if (providerID && modelID) {
+      return { providerID, modelID }
+    }
+  }
+  return null
+}
+
+function parseModelRef(model: string): ModelRef | null {
+  const trimmed = model.trim()
+  if (!trimmed) {
+    return null
+  }
+  const parts = trimmed.split("/")
+  if (parts.length < 2) {
+    return null
+  }
+  const providerID = parts[0]
+  const modelID = parts.slice(1).join("/")
+  if (!providerID || !modelID) {
+    return null
+  }
+  return { providerID, modelID }
 }
 
 function parseNotes(text: string): MemoryNotes | null {
@@ -358,6 +505,35 @@ function readStringArray(value: unknown) {
     .filter((entry) => typeof entry === "string")
     .map((entry) => entry.trim())
     .filter(Boolean)
+}
+
+function readString(value: unknown) {
+  if (typeof value !== "string") {
+    return undefined
+  }
+  const trimmed = value.trim()
+  return trimmed ? trimmed : undefined
+}
+
+function readStringMap(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined
+  }
+  const out: Record<string, string> = {}
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof entry !== "string") {
+      continue
+    }
+    out[key] = entry
+  }
+  return out
+}
+
+function readRecord(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null
+  }
+  return value as Record<string, unknown>
 }
 
 function uniqueNotes(items: string[], limit: number) {

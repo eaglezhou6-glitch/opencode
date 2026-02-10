@@ -52,6 +52,7 @@ export type ResolvedMemoryConfig = {
   flush: {
     enabled: boolean
     mode: "llm" | "heuristic"
+    useCompactionModel: boolean
     model: string
     baseUrl: string
     apiKey?: string
@@ -149,6 +150,7 @@ const DEFAULT_CONFIG = {
   flush: {
     enabled: true,
     mode: "llm",
+    useCompactionModel: true,
     model: "gpt-4o-mini",
     baseUrl: "",
     apiKey: "",
@@ -250,6 +252,8 @@ export async function resolveMemoryConfig(worktree: string): Promise<ResolvedMem
   const flushEnabled = readBool(flush.enabled) ?? DEFAULT_CONFIG.flush.enabled
   const flushModeRaw = readString(flush.mode) ?? DEFAULT_CONFIG.flush.mode
   const flushMode = flushModeRaw === "heuristic" ? "heuristic" : "llm"
+  const flushUseCompaction =
+    readBool(flush.useCompactionModel) ?? DEFAULT_CONFIG.flush.useCompactionModel
   const flushModel = readString(flush.model) ?? DEFAULT_CONFIG.flush.model
   const flushBase = readString(flush.baseUrl) ?? DEFAULT_CONFIG.flush.baseUrl
   const flushApiRaw = readString(flush.apiKey) ?? DEFAULT_CONFIG.flush.apiKey
@@ -306,6 +310,7 @@ export async function resolveMemoryConfig(worktree: string): Promise<ResolvedMem
     flush: {
       enabled: flushEnabled,
       mode: flushMode,
+      useCompactionModel: flushUseCompaction,
       model: flushModel,
       baseUrl: resolvedFlushBase,
       apiKey: resolvedFlushApi,
