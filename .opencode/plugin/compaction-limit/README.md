@@ -30,6 +30,9 @@ Optional environment overrides:
 - `OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX` (global output cap, default 32000)
 - `OPENCODE_TOOL_OUTPUT_COMPACT_TOKENS` (trigger threshold for tool output)
 - `OPENCODE_TOOL_OUTPUT_COMPACT_COOLDOWN_MS` (minimum time between triggers, default 60000)
+- `OPENCODE_TOOL_OUTPUT_MAX_LINES` (monkey-patch Truncate output limit)
+- `OPENCODE_TOOL_OUTPUT_MAX_BYTES` (monkey-patch Truncate output limit)
+- `OPENCODE_TOOL_OUTPUT_TRUNCATE_DIRECTION` (`head` or `tail`)
 
 ## Notes
 

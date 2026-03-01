@@ -2,6 +2,7 @@ import type { Model, Provider } from "@opencode-ai/sdk"
 import type { Plugin } from "@opencode-ai/plugin"
 import fs from "fs/promises"
 import path from "path"
+import { pathToFileURL } from "url"
 
 const CHARS_PER_TOKEN = 4
 const OUTPUT_TOKEN_MAX = 32_000
@@ -51,6 +52,20 @@ const toolCap = (model: Model) => {
 }
 
 const cooldown = () => num(Bun.env.OPENCODE_TOOL_OUTPUT_COMPACT_COOLDOWN_MS) ?? TOOL_OUTPUT_COOLDOWN
+
+const override = (options: { maxLines?: number; maxBytes?: number; direction?: "head" | "tail" } = {}) => {
+  const lines = num(Bun.env.OPENCODE_TOOL_OUTPUT_MAX_LINES)
+  const bytes = num(Bun.env.OPENCODE_TOOL_OUTPUT_MAX_BYTES)
+  const direction = Bun.env.OPENCODE_TOOL_OUTPUT_TRUNCATE_DIRECTION
+  if (!lines && !bytes && !direction) return options
+  const next = { ...options }
+  if (lines && next.maxLines === undefined) next.maxLines = lines
+  if (bytes && next.maxBytes === undefined) next.maxBytes = bytes
+  if (direction && next.direction === undefined) {
+    next.direction = direction === "tail" ? "tail" : "head"
+  }
+  return next
+}
 
 const pad = (value: number) => value.toString().padStart(2, "0")
 
@@ -145,6 +160,30 @@ export const CompactionLimitPlugin: Plugin = async (ctx) => {
     inflight: new Set<string>(),
     last: new Map<string, number>(),
     memory: new Map<string, string>(),
+    patched: false,
+  }
+
+  const patch = async () => {
+    if (state.patched) return
+    state.patched = true
+    const file = path.join(ctx.worktree, "packages/opencode/src/tool/truncation.ts")
+    const url = pathToFileURL(file).href
+    const mod = await import(url).catch(() => undefined)
+    const Truncate = mod?.Truncate as
+      | {
+          output?: (text: string, options?: { maxLines?: number; maxBytes?: number; direction?: "head" | "tail" }, agent?: any) => Promise<any>
+        }
+      | undefined
+    const output = Truncate?.output
+    if (!output) return
+    if ((output as any).__patched) return
+    const next = async (
+      text: string,
+      options: { maxLines?: number; maxBytes?: number; direction?: "head" | "tail" } = {},
+      agent?: any,
+    ) => output(text, override(options), agent)
+    next.__patched = true
+    Truncate!.output = next
   }
 
   const list = async () => {
@@ -218,6 +257,8 @@ export const CompactionLimitPlugin: Plugin = async (ctx) => {
       .catch(() => {})
     state.inflight.delete(sessionID)
   }
+
+  await patch()
 
   return {
     "experimental.session.compacting": async (input, output) => {
