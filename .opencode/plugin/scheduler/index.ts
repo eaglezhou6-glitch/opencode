@@ -711,8 +711,7 @@ function timeFormat(tz: string) {
   if (cached) {
     return cached
   }
-  const fmt = new Intl.DateTimeFormat("en-US", {
-    timeZone: tz,
+  const base = {
     hour12: false,
     year: "numeric",
     month: "2-digit",
@@ -721,7 +720,14 @@ function timeFormat(tz: string) {
     minute: "2-digit",
     second: "2-digit",
     weekday: "short",
-  })
+  }
+  const fmt = (() => {
+    try {
+      return new Intl.DateTimeFormat("en-US", { ...base, timeZone: tz })
+    } catch {
+      return new Intl.DateTimeFormat("en-US", base)
+    }
+  })()
   FORMATTERS.set(tz, fmt)
   return fmt
 }
@@ -1112,7 +1118,8 @@ function resolvePath(worktree: string, value: string) {
     return worktree
   }
   if (value.startsWith("~")) {
-    return path.join(os.homedir(), value.slice(1))
+    const rest = value.slice(1).replace(/^[/\\]+/, "")
+    return path.join(os.homedir(), rest)
   }
   if (path.isAbsolute(value)) {
     return value
