@@ -7,3 +7,5 @@ memory/
 !plugin/
 !plugin/memory/
 !plugin/memory/**
+!plugin/scheduler/
+!plugin/scheduler/**

@@ -9,7 +9,7 @@
     },
   },
   "mcp": {},
-  "plugin": ["./plugin/memory.ts"],
+  "plugin": ["./plugin/memory.ts", "./plugin/scheduler/index.ts"],
   "tools": {
     "github-triage": false,
     "github-pr-search": false,
