@@ -6,13 +6,13 @@ Design a scheduling plugin for OpenCode that provides cron/interval/one-shot job
 without modifying core OpenCode code. The plugin is loaded via a compiled JS entry
 configured in `.opencode/opencode.jsonc`, and exposes tools for creating and
 managing jobs. The design aligns with OpenClaw's cron subsystem (job store,
-schedule kinds, main vs isolated execution, delivery, run logs, and backoff).
+schedule kinds, run logs, and backoff), but assumes OpenCode runs all tasks in a
+single session.
 
 ## Goals
 
 - Provide a scheduler with three schedule kinds: `at`, `every`, `cron`.
-- Support two execution targets: `main` (system-event style) and `isolated`
-  (fresh session per run).
+- Execute jobs in the current session (single-session model).
 - Expose tools for job CRUD, run history, and on-demand execution.
 - Persist jobs and run logs on disk.
 - Implement rate limits, concurrency caps, and error backoff.
@@ -38,8 +38,7 @@ Key areas to mirror from OpenClaw:
 - Job schedules: `at`, `every`, `cron` (cron expr + timezone + stagger).
 - Job store: `~/.openclaw/cron/jobs.json`.
 - Run log: `~/.openclaw/cron/runs/<jobId>.jsonl`.
-- Execution modes: main session vs isolated session.
-- Delivery modes: announce, webhook, none.
+- Delivery modes: webhook or none.
 - Error backoff and one-shot disable.
 
 ## Architecture Overview
@@ -49,12 +48,10 @@ Scheduler Plugin
 ├─ Scheduler loop (tick + due computation)
 ├─ Job store (JSON, versioned)
 ├─ Run log (JSONL)
-├─ Executor
-│  ├─ main session (system-event style)
-│  └─ isolated session (agent turn)
+├─ Executor (single session)
 ├─ Delivery
-│  ├─ announce (session message)
-│  └─ webhook (HTTP POST)
+│  ├─ webhook (HTTP POST)
+│  └─ none
 └─ Tools (CRUD + run + status)
 ```
 
@@ -80,10 +77,8 @@ schedule.kind = "at" | "every" | "cron"
   "name": "Morning brief",
   "enabled": true,
   "schedule": { "kind": "cron", "expr": "0 7 * * *", "tz": "Asia/Shanghai" },
-  "sessionTarget": "isolated",
-  "wakeMode": "now",
-  "payload": { "kind": "agentTurn", "message": "Summarize the day." },
-  "delivery": { "mode": "announce", "channel": "last" },
+  "payload": { "kind": "chat", "message": "Summarize the day." },
+  "delivery": { "mode": "webhook", "to": "https://example.invalid" },
   "state": {
     "nextRunAtMs": 0,
     "lastRunAtMs": 0,
@@ -92,6 +87,15 @@ schedule.kind = "at" | "every" | "cron"
   }
 }
 ```
+
+### Payload
+
+```
+payload.kind = "chat" | "tool"
+```
+
+- `chat`: send a message to the current session via `client.session.chat`.
+- `tool`: invoke a tool with `tool` + `args`, then optionally summarize.
 
 ### Run Log
 
@@ -112,27 +116,15 @@ Each line:
 }
 ```
 
-## Execution Modes
+## Execution (single session)
 
-### Main Session (system-event style)
-
-- The plugin injects a system event into the main session.
-- `wakeMode` determines immediate or next-heartbeat behavior.
-- Best for reminders that need full context.
-
-### Isolated Session (agent turn)
-
-- Each run uses a fresh session key:
-  `cron:<jobId>:run:<uuid>`.
-- Optional model/thinking overrides.
-- Default delivery is `announce`.
+- All jobs run in the current session.
+- The plugin calls `client.session.chat(...)` with a message payload.
+- The scheduled job is tagged in the prompt (for example,
+  `[scheduled:<jobId> <job name>]`) to keep context and logs clear.
+- Optional tool-based payloads are executed through tools before/after chat.
 
 ## Delivery
-
-### announce
-
-- Deliver summary/output to the target session/channel.
-- If `channel` or `to` missing, fall back to "last route".
 
 ### webhook
 
@@ -161,9 +153,7 @@ Each line:
     "timezone": "Asia/Shanghai",
     "tickMs": 1000,
     "maxConcurrentRuns": 1,
-    "defaultWakeMode": "now",
-    "defaultDelivery": { "mode": "announce", "channel": "last" },
-    "sessionRetention": "24h",
+    "defaultDelivery": { "mode": "none" },
     "runLog": { "maxBytes": 2000000, "keepLines": 2000 }
   }
 }
@@ -180,7 +170,7 @@ Tools mirror OpenClaw:
 - `schedule_run`
 - `schedule_runs`
 - `schedule_status`
-- `schedule_wake`
+- `schedule_wake` (optional, only if a wake concept is added later)
 
 Input shapes follow the job model above, with runtime validation
 and normalization.
@@ -209,20 +199,18 @@ and normalization.
 
 - Unit tests for schedule calculation and stagger.
 - Store load/save with migration tests.
-- Execution tests for main and isolated modes.
-- Delivery tests (announce and webhook).
+- Execution tests for single-session runs.
+- Delivery tests (webhook).
 
 ## Rollout Plan
 
 1. Implement job store + scheduler tick.
-2. Add execution for main session.
-3. Add isolated session execution.
-4. Add delivery modes and run logs.
+2. Add single-session execution.
+3. Add delivery modes and run logs.
 5. Add tools.
 6. Add docs and examples.
 
 ## Open Questions
 
-- Exact integration with OpenCode session API for system events.
-- Preferred default delivery behavior for isolated jobs.
-- Whether to expose model/thinking overrides in tools by default.
+- How to reference the session ID (current vs configured session target).
+- Whether to expose model overrides per job in single-session mode.
