@@ -77,6 +77,7 @@ schedule.kind = "at" | "every" | "cron"
   "name": "Morning brief",
   "enabled": true,
   "schedule": { "kind": "cron", "expr": "0 7 * * *", "tz": "Asia/Shanghai" },
+  "agent": "default",
   "payload": { "kind": "chat", "message": "Summarize the day." },
   "delivery": { "mode": "webhook", "to": "https://example.invalid" },
   "state": {
@@ -96,6 +97,11 @@ payload.kind = "chat" | "tool"
 
 - `chat`: send a message to the current session via `client.session.chat`.
 - `tool`: invoke a tool with `tool` + `args`, then optionally summarize.
+
+### Agent
+
+- `agent`: optional agent name to use when running the scheduled job.
+- If omitted, the plugin uses the current session agent or the OpenCode default.
 
 ### Run Log
 
@@ -119,7 +125,7 @@ Each line:
 ## Execution (single session)
 
 - All jobs run in the current session.
-- The plugin calls `client.session.chat(...)` with a message payload.
+- The plugin calls `client.session.chat(...)` with `agent` when provided.
 - The scheduled job is tagged in the prompt (for example,
   `[scheduled:<jobId> <job name>]`) to keep context and logs clear.
 - Optional tool-based payloads are executed through tools before/after chat.
@@ -173,7 +179,7 @@ Tools mirror OpenClaw:
 - `schedule_wake` (optional, only if a wake concept is added later)
 
 Input shapes follow the job model above, with runtime validation
-and normalization.
+and normalization. Tools should allow `agent` to be set per job.
 
 ## Plugin Loading
 
@@ -214,3 +220,4 @@ and normalization.
 
 - How to reference the session ID (current vs configured session target).
 - Whether to expose model overrides per job in single-session mode.
+- Should `agent` be required or optional when a job is created.
